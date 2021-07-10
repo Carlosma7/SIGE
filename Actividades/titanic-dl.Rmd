@@ -1,0 +1,320 @@
+---
+title: "Deep Learning con conjunto de datos Titanic"
+author: "Carlos Morales Aguilera"
+output:
+  html_document:
+      code_folding: "show"
+      toc: true
+      toc_depth: 2
+      toc_float: true
+      df_print: paged
+---
+
+Deep Learning con el dataset [titanic](https://www.kaggle.com/c/titanic/).
+
+> El hundimiento del Titanic es una de las tragedias marítimas más conocidas de la historia. El 15 de abril de 1912, durante su viaje inaugural, el Titanic se hundió después de chocar contra un iceberg. En el accidente murieron 1502 personas de las 2224 que habían embarcado, inluyendo pasajeros y tripulación. Una de las razones por las que no se encontraron más supervivientes fue la falta de espacio en los barcos salvavidas. Así, aunque la suerte sin duda sonrió a los supervivientes, también resultaron más favorecidos algunos grupos de personas, como las mujeres, los niños y los pasajeros de la clase superior.
+
+**En este problema analizaremos qué tipos de personas tuvieron más probabilidades de sobrevivir. Para ello, aplicaremos técnicas de Deep Learning para predecir qué pasajeros sobrevivieron al hundimiento.**
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(keras)
+library(tidyverse)
+library(caret)
+set.seed(0)
+```
+
+# Instalación de Keras y Tensorflow (opcional)
+Las instrucciones para instalar [Tensorflow + Keras para R](https://keras.rstudio.com) están disponibles [aquí](https://tensorflow.rstudio.com/reference/keras/install_keras/). 
+
+En resumen, primero hay que instalar el paquete `keras` de R, que inicialmente no es funcional, con `install.packages("keras")`. Después se utiliza la función `install_keras()` para realizar la instalación de Keras R y del _backend_ de Tensorflow. Es recomendable disponer de una instalación previa de [Anaconda](https://www.anaconda.com) para gestionar Python y los entornos.
+
+```{r instalacion, eval=FALSE}
+library(keras)
+install_keras(
+  method = "conda",            # usar conda
+  tensorflow = "default",      # tensorflow = "gpu"
+  envname = "r-tensorflow"     # nombre del nuevo entorno
+)
+```
+Comprobamos que ya sí está disponible: 
+```{r keras-disponible}
+is_keras_available()
+```
+
+
+# Leer datos
+Comenzamos leyendo los datos del problema y seleccionando las variables que funcionan bien para la predicción: _Pclass_, _Sex_, _Age_, _Fare_. El objetivo de predicción es _Survived_. Omitimos los valores perdidos, aunque sería interesante [trabajar con ellos](https://github.com/jgromero/sige2020/blob/master/Teor%C3%ADa/02%20Depuraci%C3%B3n%20y%20calidad%20de%20datos/code/titanic-missing-noise.Rmd).
+
+```{r lectura}
+data <- read_csv('train.csv') %>%
+  select(Survived, Pclass, Sex, Age, Fare) %>%
+  mutate(Sex = as.numeric(as.factor(Sex)) - 1) %>%
+  na.omit()
+
+data
+```
+
+# Red neuronal simple
+A continuación, creamos la red neuronal que vamos a utilizar. Optamos por una red bastante sencilla:
+
+* Una capa de entrada, de tamaño `ncol(data) - 1` (todas las variables menos el objetivo de predicción)
+* Dos capas ocultas, con 32 y 16 neuronas respectivamente y activación tipo "relu"
+* Una capa de salida, con 1 neurona y activación tipo "sigmoid"
+
+```{r crear-rn}
+model <- keras_model_sequential()
+model <- model %>% 
+  layer_dense(units = 32, activation = "relu", input_shape = c(ncol(data) - 1)) %>%
+  layer_dense(units = 16, activation = "relu") %>%
+  layer_dense(units = 1, activation = "sigmoid")
+```
+
+Podemos revisar la arquitectura de la red y los parámetros (pesos) que se deben aprender:
+```{r descripcion-rn}
+summary(model)
+```
+
+# Entrenamiento
+Para entrenar el modelo, primero utilizamos `compile()` para especificar el optimizador, la función de pérdida, etc.
+```{r configurar-entrenamiento}
+model %>% compile(
+  loss = 'binary_crossentropy',
+  metrics = c('accuracy'),
+  optimizer = optimizer_adam()
+)
+```
+
+Después, especificamos el conjunto de entrenamiento y validación, que deben especificarse por separado y con tipo de dato `matrix`.
+```{r particion-datos}
+trainIndex <- createDataPartition(data$Survived, p = .7, list = FALSE)
+train      <- data[trainIndex, ] 
+val        <- data[-trainIndex, ]
+
+x_train <- train %>%
+  select(-Survived) %>%
+  data.matrix()
+
+y_train <- train %>%
+  select(Survived) %>%
+  data.matrix()
+```
+
+Ya podemos ajustar el modelo con `fit`. Los parámetros que especificamos son el número de iteraciones completas (`epochs`) y el tamaño del lote para el gradiente descendente con minilotes (`batch_size`). También puede indicarse que se quiere utilizar una parte del conjunto de entrenamiento para realizar validación al final de cada _epoch_.
+```{r entrenamiento}
+history <- model %>% 
+  fit(
+    x_train, y_train, 
+    epochs = 20, 
+    batch_size = 100,  # cambiar a 20 (más: https://arxiv.org/abs/1804.07612) 
+    validation_split = 0.10
+  )
+plot(history)
+```
+
+Es posible utilizar diversos _callbacks_ con `fit()`, como por ejemplo el `callback_tensorboard()`.
+```{r entrenamiento-callback}
+history <- model %>% 
+  fit(
+    x_train, y_train, 
+    epochs = 20, 
+    batch_size = 100, 
+    validation_split = 0.10,
+    callbacks = callback_tensorboard("logs/run")
+  )
+#tensorboard("logs/run")
+```
+
+# Validación y predicción
+Podemos evaluar el modelo sobre el conjunto de validación:
+```{r validacion}
+x_val <- val %>%
+  select(-Survived) %>%
+  data.matrix()
+
+y_val <- val %>%
+  select(Survived) %>%
+  data.matrix()
+
+model %>% evaluate(x_val, y_val)
+```
+
+Y, finalmente, realizar predicciones con él:
+```{r prediccion}
+predictions <- model %>% predict_classes(x_val)
+```
+
+Con las predicciones, se puede estudiar el comportamiento de la red con los datos de validación. Así, creamos una matriz de confusión:
+```{r matriz-confusion}
+cm <- confusionMatrix(as.factor(y_val), as.factor(predictions))
+cm_prop <- prop.table(cm$table)
+cm$table
+```
+
+Y, por último, generar una representación visual de la matriz de confusión:
+```{r matriz-confusion-visual}
+library(scales)
+cm_tibble <- as_tibble(cm$table) 
+
+ggplot(data = cm_tibble) + 
+  geom_tile(aes(x=Reference, y=Prediction, fill=n), colour = "white") +
+  geom_text(aes(x=Reference, y=Prediction, label=n), colour = "white") +
+  scale_fill_continuous(trans = 'reverse') 
+```
+
+# Alternativa 1: Arquitectura de la red
+
+Se ha va a probar con un modelo más sencillo, que utilice una capa de entrada de 32 neuronas y función de activación *relu*. Poseerá además una capa de salida con función de activación *sigmoidal*
+
+Por otro lado se van a mantener unos prámetros sencillos tanto para la pérdida, como optimizador, épocas y batch.
+
+```{r modelo_arquitectura}
+
+# Establecer semilla
+tensorflow::tf$random$set_seed(0)
+
+# Definir modelo secuencial
+modelo_arq <- keras_model_sequential()
+# Definir arquitectura del modelo
+modelo_arq <- modelo_arq %>% 
+   layer_dense(units = 32, activation = "relu", input_shape = c(ncol(data) - 1)) %>%
+   layer_dense(units = 1, activation = "sigmoid")
+# Compilar modelo
+modelo_arq %>% compile(
+  loss = 'binary_crossentropy',
+  metrics = c('accuracy'),
+  optimizer = 'adam'
+)
+# Establecer ajuste del modelo
+history <- modelo_arq %>% 
+  fit(
+    x_train, y_train, 
+    epochs = 20, 
+    batch_size = 100,
+    validation_split = 0.10
+  )
+# Dibujar modelo
+plot(history)
+# Evaluar modelo sobre conjuntos de test
+modelo_arq %>% evaluate(x_test, y_test)
+# Predicción utilizando el modelo
+predictions <- modelo_arq %>% predict_classes(x_test)
+# Matriz de confusión y accuracy
+conf_matrix <- confusionMatrix(as.factor(y_test), as.factor(predictions), positive='1')
+accuracy_arq <- as.numeric(conf_matrix$overall['Accuracy'])
+conf_matrix
+
+```
+
+Esta alternativa no es buena al obtener un *71,9%*, ya que se obtienen resultados peores que los previamente obtenidos, por lo que no sería un modelo interesante para el problema, vamos a continuación a estudiar otros modelos.
+
+
+# Alternativa 2: Ajuste de hiperparámetros
+
+Se utiliza una estructura similar a la anterior solo que variando el número de épocas de la red neuronal, para ello se van a utilizar un total de 300 épocas en lugar de las 20 previas del modelo inicial. Además se utilizará un 20% de los datos como validación.
+
+```{r  modelo_hiperparametros}
+# Establecer semilla
+tensorflow::tf$random$set_seed(0)
+# Definir modelo secuencial
+modelo_hip <- keras_model_sequential()
+# Definir arquitectura del modelo
+modelo_hip <- model %>% 
+  layer_dense(units = 32, activation = "relu", input_shape = c(ncol(data) - 1)) %>%
+  layer_dense(units = 16, activation = "relu") %>%
+  layer_dense(units = 1, activation = "sigmoid")
+# Compilar modelo
+modelo_hip %>% compile(
+  loss = 'binary_crossentropy',
+  metrics = c('accuracy'),
+  optimizer = 'adam'
+)
+# Establecer ajuste del modelo
+history <- modelo_hip %>% 
+  fit(
+    x_train, y_train, 
+    epochs = 300, 
+    batch_size = 100,
+    validation_split = 0.20
+  )
+# Dibujar modelo
+plot(history)ç
+# Evaluar modelo sobre conjuntos de test
+modelo_hip %>% evaluate(x_test, y_test)
+# Predicción utilizando el modelo
+predictions<-modelo_hip %>% predict_classes(x_test)
+# Matriz de confusión y accuracy
+conf_matrix2<-confusionMatrix(as.factor(y_test), as.factor(predictions), positive='1')
+accuracy_hip<-as.numeric(conf_matrix2$overall['Accuracy'])
+conf_matrix2
+```
+
+Esta alternativa que obtiene un *77,5%* de acierto es una clara mejora respecto al modelo inicial, por lo que es una alternativa viable, aunque evidentemente supone un mayor cómputo, por lo que realmente dependerá su elección de cuestiones computacionales.
+
+# Alternativa 3: Modelo definido
+
+Para este modelo se han realizado diversas pruebas con diferentes optimizadores, hiperparámetros y arquitecturas, para ello se ha definido un modelo final con la siguiente estructura:
+
+Modelo de 4 capas:
+* Dense con activación *relu* de entrada, con 128 neuronas.
+* Dense con activación *relu*, de 64 neuronas.
+* Dense con activación *relu*, de 32 neuronas.
+* Dense con activación *sigmoid* de salida.
+
+Por otro lado se ha escogido el optimizador *adam* ya que es el que ofrece mejores resultados, junto con 200 épocas, y un tamaño de batch de 100. Se ha optado por un conjunto de validación del 15%.
+
+```{r modelo_final}
+# Establecer semilla
+tensorflow::tf$random$set_seed(0)
+# Definir modelo secuencial
+modelo_fin <- keras_model_sequential()
+# Definir arquitectura del modelo
+modelo_fin <- modelo_hip %>% 
+    layer_dense(units = 128, activation = "relu", input_shape = c(ncol(data) - 1)) %>%
+    layer_dense(units = 64, activation = "relu") %>%
+    layer_dense(units = 32, activation = "relu") %>%
+    layer_dense(units = 1, activation = "sigmoid")
+# Compilar modelo
+modelo_fin %>% compile(
+  loss = 'binary_crossentropy',
+  metrics = c('accuracy'),
+  optimizer = 'adam'
+)
+# Establecer ajuste del modelo
+history <- modelo_fin %>% 
+  fit(
+    x_train, y_train, 
+    epochs = 200, 
+    batch_size = 100,
+    validation_split = 0.15
+  )
+# Dibujar modelo
+plot(history)
+# Evaluar modelo sobre conjuntos de test
+modelo_fin %>% evaluate(x_test, y_test)
+# Predicción utilizando el modelo
+predictions<-modelo_fin %>% predict_classes(x_test)
+# Matriz de confusión y accuracy
+conf_matrix3<-confusionMatrix(as.factor(y_test), as.factor(predictions), positive='1')
+accuracy_fin<-as.numeric(conf_matrix3$overall['Accuracy'])
+conf_matrix3
+
+```
+
+Evidentemente este modelo obtiene mejores resultados ya que posee una red más amplia y un mayor cómputo y se ajusta mejor, aunque el coste computacional evidentemente es mayor y quizás convenga la solución previa antes que esta.
+
+# Tabla de resultados
+
+```{r tabla}
+modelo <- c("Arquitectura", "Hiperparámetros", "Final")
+resultado <- c(accuracy_arq, accuracy_hip, accuracy_fin)
+tabla <- data.frame(modelo, resultado)
+knitr::kable(tabla, "pipe")
+```
+
+
+Como se puede apreciar, es evidente que el optimizador *ADAM* obtiene grandes resultados y funciona por norma general en ciertos modelos mejor que otros optimizadores evaluados como *SGD* o *SMGProp*, aunque dependerá evidentemente del problema.
+
+Por otro lado se puede observar que incremenetar el número de épocas obtiene mejores resultados, aunque con un mayor coste computacional asociado, lo cual deberá ser valorado en cada problema según las circunstancias. Por otro lado otra preocupación podría ser el sobreaprendizaje de un modelo que empieza a aprender constantemente sobre el mismo conjunto de datos llegando a modelos erróneos.
+
+Al final, como se ha visto tanto en esta como en otras asignaturas, la importancia de definir un modelo adecuado al problema y las herramientas disponibles es esencial al afrontar un problema. Tanto la capacidad de cómputo disponible, como la estructura del problema deben ser analizados con el fin de definir un modelo que se ajuste de la mejor manera posible a las especificaciones pero sin caer en errores como *overfitting* o gastos de cómputos innecesarios o excesivos.

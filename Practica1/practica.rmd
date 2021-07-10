@@ -1,0 +1,2042 @@
+---
+title: |
+  **Exploración de datos del problema Higgs**
+  \bigskip
+author: "Carlos Morales Aguilera"
+date: |
+  23/03/2021
+  \pagebreak
+output:
+    pdf_document: 
+      toc: yes
+      number_sections: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE)
+library(knitr)
+library(tidyverse)
+library(funModeling)
+library(DataExplorer)
+library(janitor)
+library(plm)
+library(MASS)
+library(olsrr)
+library(caret)
+library(pROC)
+library(rattle)
+library(NeuralNetTools)
+```
+
+# Problema
+
+El problema propuesto pertenece a una [competición de Kaggle](https://www.kaggle.com/c/higgs-boson/) sobre la identificación del bosón de Higgs con los experimento ATLAS aplicando técnicas de Machine Learning. ATLAS es un eperimento de física de partículas llevado a cabo en el Gran Colisionador de Hadrones del CERN. Este experimento busca nuevas partículas mediante la colisión frontal de protones de energía muy alta.
+
+El objetivo del desafío propuesto es realizar un problema de aprendizaje automático en el que se examine la posibilidad de aplicar diferentes técnicas de Machine Learning para la predicción binaria de un bosón de Higgs o ruido a partir de una serie de eventos detectados por ATLAS.
+
+Para este problema se realizaran una serie de tareas que se describen: 
+
+1. Lectura de datos.
+2. Análisis exploratorio de los datos.
+3. Preprocesamiento de los datos.
+4. Clasificación con diversos modelos.
+5. Análisis de resultados.
+6. Alternativas de planteamiento del problema.
+7. Conclusiones finales sobre el problema.
+
+## Lectura de datos
+
+El código empleado tanto para la lectura de datos, como parte del código empleado para el análisis exploratorio pertenecen al profesor D. Juan Gómez Romero, de su [repositorio](https://github.com/jgromero/sige2021) de la asignatura de Sistemas Inteligentes para la Gestión de la empresa (SIGE) del Máster Profesional en Ingeniería Informática de la Universidad de Granada.
+
+El primer paso es comprobar si se poseen los ficheros asociados a los datos del problema, en caso de no existir, se descargan:
+
+
+```{r descargar}
+if(!file.exists("data/training.csv")) {
+  library(httr)  
+  url <- "http://sl.ugr.es/higgs_sige"
+  GET(url, write_disk(temp <- tempfile(fileext = ".zip")))
+  unzip(temp, exdir = "data")
+  unlink(temp)
+}
+```
+
+Posteriormente se leen los datos de entrenamiento:
+
+```{r leer-entrenamiento}
+training_data_raw <- read_csv("data/training.csv")
+```
+
+Antes de empezar a realizar el análisis exploratorio, se recodifican los valores perdidos como `NA`:
+
+```{r recodificar}
+training_data_raw <- training_data_raw %>%
+  na_if(-999.0)
+```
+
+## Análisis exploratorio de los datos
+
+### Resumen de los datos
+
+El primer paso es realizar un análisis exploratorio inicial de los datos, para ello visualizamos un resumen inicial de los mismos:
+
+```{r resumen}
+summary(training_data_raw)
+```
+
+Se muestra ahora el estado de cada una de las variables del conjunto de datos:
+
+```{r status}
+kable(df_status(training_data_raw, FALSE))
+```
+
+A continuación observaremos si el conjunto de datos se encuentra balanceado, observando los valores de cada clase:
+
+```{r tabla}
+table(training_data_raw$Label)
+```
+
+Se realiza una representación gráfica mediante un gráfico:
+
+```{r clases, warning=FALSE}
+ggplot(training_data_raw) +
+  geom_histogram(aes(x = Label, fill = as.factor(Label)), stat = "count") +
+  labs(x = "", y = "") +
+  scale_fill_discrete(name ="Clase", labels=c("(b)ackground", "higg(s)"))
+```
+
+### Estratificación
+
+Se puede ver entonces que el conjunto de datos está claramente desbalanceado, ya que existe un mayor número de eventos asociados a ruido, lo cual es lógico con la naturaleza del proyecto ya que es más extraño encontrar un evento de un bosón de Higgs que ruido.
+
+
+Por otro lado, también podemos observar la distribución de las clases para los diferntes valores de las distintas variables que componen el conjunto de datos, este procedimiento se conoce como _estratificación_, en este caso se analizarán las diferentes variables, pero solamente se mostrará la variable _DER_met_phi_centrality_:
+
+```{r clases-var}
+ggplot(training_data_raw) +
+  geom_histogram(aes(x = DER_met_phi_centrality, fill = as.factor(Label)), 
+                 bins = 10) +
+  labs(x = "DER_met_phi_centrality", y = "") +
+  scale_fill_discrete(name ="Clase", labels=c("(b)ackground", "higg(s)"))
+```
+
+Por otro lado se pueden ver pseudo-distribuciones de probabilidades de las diferentes variables, se examinarán todas, aunque se visualizará únicamente la variable indicada anteriormente:
+
+```{r densidad}
+ggplot(training_data_raw) +
+  geom_density(aes(x = DER_met_phi_centrality, fill = Label, color = Label), 
+               alpha = 0.3) +
+  labs(x = "DER_met_phi_centrality", y = "") +
+  scale_fill_discrete(name ="Clase", labels=c("(b)ackground", "higg(s)")) +
+  scale_color_discrete(name ="Clase", labels=c("(b)ackground", "higg(s)"))
+```
+
+A continuación se observa en las correlaciones de las diferentes variables con la clasificación final de los eventos que se estudian utilizando para ello [Shiny](https://shiny.rstudio.com/), con todas las variables que no posean _NAs_:
+
+```{r densidad-interactiva, echo=FALSE, eval=FALSE}
+cols <- training_data_raw %>%
+  select_if(~ !any(is.na(.))) %>%
+  select(starts_with(c("DER", "PRI"))) %>%
+  names() %>%
+  sort()
+inputPanel(
+  selectInput("x_variable", label = "Variable x:",
+              choices = cols, 
+              selected = cols[1])
+)
+renderPlot({
+  ggplot(training_data_raw) + 
+    geom_density(aes_string(x = input$x_variable, fill = "Label", 
+                            color = "Label"), alpha = 0.3) +
+    labs(x = "", y = "") +
+    scale_fill_discrete(name ="Clase", labels=c("(b)ackground", "higg(s)")) +
+    scale_color_discrete(name ="Clase", labels=c("(b)ackground", "higg(s)"))
+})
+renderUI({
+  HTML(paste0(
+    "<p>Correlacion con objetivo de clasificación: <b>",
+    cor(training_data_raw[input$x_variable], 
+        as.numeric(factor(training_data_raw$Label))),
+    "</b></p>"
+  ))
+})
+```
+
+| Variable                    | Correlación          |
+|-----------------------------|----------------------|
+| DER_mass_transverse_met_lep | -0.351427955861676   |
+| DER_mass_vis                | -0.0140552737848525  |
+| DER_pt_h                    | 0.192526328568748    |
+| DER_deltar_tau_lep          | 0.0122454812854829   |
+| DET_pt_tot                  | -0.0152874266877814  |
+| DER_sum_pt                  | 0.153235932475814    |
+| DER_pt_ratio_lep_tau        | -0.195397896182878   |
+| DER_met_phi_centrality      | 0.271751877051649    |
+| PRI_tau_pt                  | 0.235237975878367    |
+| PRI_tau_eta                 | -0.00094325105821175 |
+| PRI_tau_phi                 | -0.00440253868638842 |
+| PRI_lep_pt                  | -0.0319475868053482  |
+| PRI_lep_eta                 | 0.00151623537705973  |
+| PRI_lep_phi                 | 0.00412544741152485  |
+| PRI_met                     | 0.0224657515107859   |
+| PRI_met_phi                 | 0.00747534218859026  |
+| PRI_met_sumet               | 0.135520261522685    |
+| PRI_jet_num                 | 0.133549123081692    |
+| PRI_jet_all_pt              | 0.134295726669253    |
+
+
+### Análisis exploratorio con DataExplorer
+Por otro lado, se puede llevar a cabo un informe de un análisis exploratorio de los datos utilizando la librería  [DataExplorer](https://boxuancui.github.io/DataExplorer/) con la que podemos observar diferentes gráficos que informan sobre el conjunto de datos:
+
+```{r generar-informe, include=FALSE, eval=FALSE}
+create_report(training_data_raw)
+```
+
+Podemos observar por lo tanto una información inicial del conjunto de datos y los valores perdidos que se poseen:
+
+| Name                 | Value     |
+|----------------------|-----------|
+| Rows                 | 250,000   |
+| Columns              | 33        |
+| Discrete columns     | 1         |
+| Continuous columns   | 32        |
+| All missing columns  | 0         |
+| Missing observations | 1,580,052 |
+| Complete Rows        | 68,114    |
+| Total observations   | 8,250,000 |
+| Memory allocation    | 63 Mb     |
+
+A continuación observamos dicha información de modo gráfico:
+
+```{r}
+plot_intro(training_data_raw)
+```
+
+Como es lógico, no trabajaremos con los valores perdidos, por los que posteriormente todos los datos codificados como _NAs_ serán descartados.
+
+A continuación, para analizar dichos valores perdidos observamos en que columnas se encuentran y poder sacar posteriores conclusiones:
+
+```{r missing, eval=FALSE}
+plot_missing(training_data_raw)
+```
+
+![Missing](.\Imagenes\missing.png "Missing")\
+
+
+Se puede observar que se poseen más pérdidas en variables asociadas a los jets tras observar el gráfico y comprender dichas variables según la documentación proporcionada.
+
+A continuación vemos de nuevo la proporción de datos, que como es lógico y hemos visto antes, existen más casos de ruido (background) que de bosones (Higgs).
+
+```{r}
+plot_bar(training_data_raw)
+```
+
+A continuación, analizando más en profundidad las distintas variables que posee el conjunto de datos podemos ver como se distribuyen utilizando para ello gráficos de histogramas por cada una de las variables disponibles:
+
+```{r}
+plot_histogram(training_data_raw)
+```
+
+Podemos ver que la distribución de los datos no es uniforme, cosa que podemos corroborar utilizando gráficos de quantiles:
+
+```{r, warning=FALSE}
+plot_qq(training_data_raw)
+```
+
+Por último, podemos observar la correlación de las diferentes variables utilizando una matriz de correlación que se visualice de forma gráfica:
+
+```{r correlation, eval=FALSE}
+plot_correlation(training_data_raw)
+```
+
+![Correlación](.\Imagenes\correlation.png "Correlación")\
+
+Como es lógico podemos observar que las variables derivadas están relacionadas con sus variables primitivas, y variables que operan sobre conceptos similares a su vez también poseen un gran grado de correlación.
+
+El siguiente paso en este trabajo será realizar un preprocesamiento correcto en base a lo observado tras este análisis inicial, omitiendo valores perdidos, tratando de balancear clases y analizando las variables. Tras este primer análisis explortatorio se ha podido observar que las clases están desbalanceadas, que la distribución de los datos no es uniforme y que existen determinadas variables que poseen una mayor correlación con la clasificación final de los diferentes eventos. Estos serán los factores iniciales que determinen un camino de cara al preprocesamiento de los datos.
+
+## Preprocesamiento de los datos
+
+### Omisión de características inservibles
+
+Tras leer la descripción del problema podemos comprobar que la característica _EventId_ no es útil para el problema ya que solo representa el registro mediante identificador del evento. Por otro lado, la característica _Weight_ no aporta información al problema de cara a la clasificación, por lo que también queda descartada:
+
+```{r discard}
+training_data_raw[,"EventId"] <- NULL
+training_data_raw[,"Weight"] <- NULL
+```
+
+### Omisión de valores perdidos
+
+Uno de los preprocesamientos más comunes y prácticos es la omisión de valores perdidos, descartando por lo tanto eventos de los cuales no se conocen todos los datos, ya que al tratarse de datos parciales, no podemos obtener toda la información para poder realizar un modelo predictivo correcto en base a todos los datos aportados, por lo que para el estudio de modelos, descartaremos los datos con valores perdidos.
+
+```{r omit-na}
+training_data_raw <- na.omit(training_data_raw)
+```
+
+Como podemos observar pasamos de un conjunto de datos de 250.000 eventos a un conjunto mucho más reducido pero suficientemente grande de 68.114, a continuación veremos el balanceo de las clases tras esta omisión de datos:
+
+```{r clases2, warning=FALSE}
+ggplot(training_data_raw) +
+  geom_histogram(aes(x = Label, fill = as.factor(Label)), stat = "count") +
+  labs(x = "", y = "") +
+  scale_fill_discrete(name ="Clase", labels=c("(b)ackground", "higg(s)"))
+```
+
+Podemos ver que pese a encontrarse desbalanceados, es mucho menor el desbalanceo de los datos obtenidos, lo cual es positivo de cada al análisis de los datos, pero a su vez por falta de información podría llevar a un modelo erróneo, pese a que los datos eliminados tuvieran valores perdidos.
+
+### Detección de outliers
+
+A continuación, se procede a evaluar los posibles _outliers_ de las variables numéricas, para ello se va a emplear la denominada *Distancia de Cook* (tal y como se ve en el tutorial http://r-statistics.co/Outlier-Treatment-With-R.html). Para ello se utiliza un enfoque multivariable como el que se posee en el problema y generando un modelo de regresión, como puede ser un modelo lineal, calcula la importancia de cada uno de los puntos para este modelo con sus respectivas variables, esto permite detectar puntos demasiado importantes que por lo tanto consideraremos _outliers_.
+
+```{r cooks}
+training_data_raw$Label <- as.factor(training_data_raw$Label)
+
+mod <- lm(as.numeric(Label)~., data=training_data_raw)
+
+cooksd <- cooks.distance(mod)
+
+plot(cooksd, pch="*", cex=2, main="Influential Obs by Cooks distance")
+abline(h = 4*mean(cooksd, na.rm=T), col="red")
+text(x=1:length(cooksd)+1, y=cooksd, 
+     labels=ifelse(cooksd>4*mean(cooksd, na.rm=T),
+                   names(cooksd),""), col="red")
+```
+
+```{r influential}
+influential <- as.numeric(names(cooksd)[(cooksd > 4*mean(cooksd, na.rm=T))])
+training_data_raw[influential, ]  # influential observations.
+training_data_raw <- training_data_raw[-influential,]
+```
+
+### Discretización de variables
+
+Una de las técnicas principales de preprocesamiento de datos consiste en la discretización de valores continuos, o discretización de valores categóricos como agrupación de estas categorías en otras que abarquen más categorías en una misma.
+
+Sin embargo, en el problema que estamos tratando, todas las variables son numéricas, y realizar una discretización lógica conllevaría un mayor aprendizaje del problema para poder tomar decisiones coherentes en cuanto a la agrupación en diferentes categorías, por lo que se ha optado por descartar una discretización de las variables.
+
+### Tratamiento del ruido
+
+Otro de los principales problemas son aquellas etiquetas que pueden suponer un aumento de la complejidad del problema por lo que se consideran ruido. Este ruido puede ser tratado mediante diferentes filtros que eliminan dichos eventos y que facilitan el posterior aprendizaje de los diferentes modelos de clasificación. 
+
+Para ello se utiliza la función [edgeBoostFilter](https://rdrr.io/cran/NoiseFiltersR/man/edgeBoostFilter.html) del paquete [NoiseFilterR](https://rdrr.io/cran/NoiseFiltersR/) el cual permite definir una serie de filtros y limpia los datos del ruido existente en las etiquetas.
+
+```{r}
+library(NoiseFiltersR)
+training_data_raw <- edgeBoostFilter(Label~., training_data_raw)
+training_data_raw <- training_data_raw$cleanData
+```
+
+### Normalización de variables
+
+Otra de las técnicas principales consiste en la normalización de las variables numéricas dentro de unos límites más reducidos y trasladando sus valores. Este procedimiento se conoce como _normalización_ y existen diferentes tipos. En este caso se empleará uno de los tipos más comunes, consistente en una normalización del tipo _min_max_, el cual establece entre límites de 0 y 1 todos los valores, siendo el menor de ellos el 0 y el mayor el 1.
+
+Para ello utilizaremos una implementación de la función manual:
+
+```{r norm}
+# Definition of min_max normalization function
+min_max_norm <- function(x) {
+  (x -min(x)) / (max(x) - min(x))
+}
+```
+
+A continuación se normalizan todas las variables numéricas:
+
+```{r normalize}
+# Normalize variables
+for(i in 1:length(training_data_raw[-1])) 
+  training_data_raw[,i] <- min_max_norm(training_data_raw[,i])
+```
+
+### Selección de características
+
+Una de las técnicas más útiles a la hora de reducir el tamaño del problema es la selección de características (variables), por lo que para ello se entrenará un *modelo lineal* y se observarán que variables son necesarias para la construcción del modelo.
+
+Se procede a realizar el **Modelo lineal**. Para ello primero entrenamos el modelo con un [modelo lineal](https://en.wikipedia.org/wiki/Linear_model) utilizando la función [lm](https://www.rdocumentation.org/packages/stats/versions/3.6.2/topics/lm).
+
+```{r lm}
+# Train the linear model
+model <- lm(as.numeric(Label)~., data = training_data_raw)
+model
+```
+
+A continuación construimos un modelo de regresión para establecer una variables predictoras añadiendo y elimininando predictores basándonos en el valor p, para ello utilizamos la función [ols_step_both_p](https://www.rdocumentation.org/packages/olsrr/versions/0.5.3/topics/ols_step_both_p) del paquete [olsrr](https://cran.r-project.org/web/packages/olsrr/index.html):
+
+```{r ols}
+# Regression model
+k <- ols_step_both_p(model)
+summary(k$model)
+plot(k)
+```
+
+Por lo tanto el modelo final contendrá las siguientes variables:
+
+| Variables                   |
+|-----------------------------|
+| DER_mass_transverse_met_lep |
+| DER_pt_h                    |
+| DER_deltaeta_jet_jet        |
+| DER_mass_jet_jet            |
+| DER_pt_tot                  |
+| DER_pt_ratio_lep_tau        |
+| DER_met_phi_centrality      |
+| DER_lep_eta_centrality      |
+| PRI_tau_pt                  |
+| PRI_jet_num                 |
+| DER_deltar_tau_lep          |
+| PRI_jet_leading_pt          |
+| DER_mass_vis                |
+| PRI_lep_pt                  |
+| PRI_met_sumet               |
+| PRI_met                     |
+| PRI_jet_subleading_pt       |
+| PRI_lep_eta                 |
+| PRI_jet_subleading_phi      |
+| PRI_jet_subleading_eta      |
+| PRI_jet_leading_eta         |
+
+Eliminamos por lo tanto las variables que no se utilizan:
+
+```{r discard-variables}
+training_data <- training_data_raw
+training_data[,"DER_mass_MMC"] <- NULL
+training_data[,"DER_prodeta_jet_jet"] <- NULL
+training_data[,"DER_sum_pt"] <- NULL
+training_data[,"PRI_tau_eta"] <- NULL
+training_data[,"PRI_tau_phi"] <- NULL
+training_data[,"PRI_lep_phi"] <- NULL
+training_data[,"PRI_met_phi"] <- NULL
+training_data[,"PRI_jet_leading_phi"] <- NULL
+training_data[,"PRI_jet_all_pt"] <- NULL
+
+# Save data for later purposes
+training_data_saved <- training_data
+```
+
+## Modelos de clasificación
+
+[caret](http://topepo.github.io/caret/) incorpora métodos que permiten realizar validación cruzada mediante el controlador *trainControl*. Para ello se realizará primero una partición de los datos considerando una partición del 80% de los datos como entrenamiento y un 20% restante como validación.
+
+```{r particion}
+set.seed(0)
+trainIndex <- createDataPartition(training_data$Label, p = .8, list = FALSE)
+training_set <- training_data[trainIndex, ]
+validation_set   <- training_data[-trainIndex, ]
+
+trClassCtrl <- trainControl(classProbs = TRUE, 
+                            summaryFunction = twoClassSummary, 
+                            method = "cv", number = 10,
+                            verboseIter=FALSE)
+```
+
+Para la realización de la práctica se ha decidido tomar diferentes modelos de clasificación y ver como estos son capaces de adaptarse a las condiciones del problema. Los modelos escogidos son:
+
+* Árboles de decisión, con la función [rpart](https://www.rdocumentation.org/packages/rpart/versions/4.1-15/topics/rpart). Se ha escogido este modelo ya que es uno de los modelos principales y más sencillos para ver como se comporta ante un problema tan complejo, además se realizará una variante en la que se explora todo el árbol.
+* Random Forest, con la función [ranger](https://cran.r-project.org/web/packages/ranger/ranger.pdf). Este modelo se ha escogido ya que utiliza un promedio de árboles de decisión y entrena un bosque, por lo que resulta interesante ver como se toman las diferentes decisiones y se promedian.
+* Red Neuronal Artificial, con [nnet](https://www.rdocumentation.org/packages/nnet/versions/7.3-14/topics/nnet). Como uno de los modelos más representativos de la Inteligencia Artificial, y además considerando la potencia de las redes neuronales, se ha escogido este método con una variación sobre el tamaño y el valor _decay_ para comprobar también los diferentes comportamientos que puede tener una red neuronal y como se pueden adaptar al problema. Este tipo de modelo también resulta interesante debido a su adaptatibilidad al problema.
+* Naive Bayes, con [naiveBayes](https://www.rdocumentation.org/packages/e1071/versions/1.7-3/topics/naiveBayes). Con el fin de obtener un modelo probabilístico, se ha escogido este modelo, ya que se trata de uno de los más sencillos y a la vez más conocidos, por lo que poseer un enfoque diferente puede resultar interesante para la realización de este trabajo.
+* K-Nearest Neighbour, con [knn](https://www.rdocumentation.org/packages/DMwR/versions/0.4.1/topics/kNN). Uno de los modelos más sencillos, aunque no se esperan a priori grandes resultados, es interesante ver como se distribuyen de forma espacial los datos, por lo que existe un importante interés en dicho modelo.
+* Generalized Linear Model (glm). Finalmente se escoge también este modelo ya que utiliza conceptos como componentes de aleatoriedad, componentes sistemáticas que especifica las variables explicativas o predictoras y una función que define el valor esperado como combinación de las variables predictoras.
+
+Tras observar los resultados obtenidos, se analizaran los resultados obtenidos, se obtendrán una serie de conclusiones sobre los modelos, y se obtendrá conocimiento suficiente para poder analizar modelos de predicción de bosón de Higgs.
+
+Todos estos modelos a su vez serán comprobados mediante matrices de confusión con la función [confusionMatrix](https://www.rdocumentation.org/packages/caret/versions/3.45/topics/confusionMatrix) de la librería [caret](http://topepo.github.io/caret/index.html) y visualizandolas gráficamente, y con curvas ROC del paquete [pROC](https://cran.r-project.org/web/packages/pROC/pROC.pdf).
+
+### Árboles de decisión
+
+El primer modelo de clasificación escogido es el [árbol de decisión binario](https://es.wikipedia.org/wiki/Aprendizaje_basado_en_%C3%A1rboles_de_decisi%C3%B3n), el cual dado un conjunto de datos, divide este por características de forma que se tome una decisión o su opuesta, para clasificar. Se ha definido una función que solicita un conjunto de entrenamiento y realiza la clasificación en un árbol de decisión binario. Para ello se ha utilizado la librería [rpart](https://cran.r-project.org/web/packages/rpart/rpart.pdf), concretamente haciendo uso tanto de la función [rpart](https://www.rdocumentation.org/packages/rpart/versions/4.1-15/topics/rpart) como de su representación mediante [rpart.plot](https://www.rdocumentation.org/packages/rpart.plot/versions/3.0.9/topics/rpart.plot), perteneciente a la librería [rpart.plot](https://cran.r-project.org/web/packages/rpart.plot/rpart.plot.pdf).
+
+```{r decision-tree, message=FALSE}
+# Define model
+modelo_rpart <- train(Label ~ .,
+                      data = training_set,
+                      method = "rpart",
+                      metric = "ROC",
+                      trControl = trClassCtrl)
+
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rpart, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rpart, validation_set)
+```
+
+```{r decision-tree results}
+# Get AUC by ROC curve
+auc_rpart <- roc(validation_set$Label, predictionValidationProb[["s"]], 
+                 levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rpart, ylim=c(0,1), type = "S" , print.thres = T, 
+                           main=paste('Validation AUC:', 
+                                      round(auc_rpart$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rpart <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rpart$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rpart$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+Y dibujamos el árbol:
+
+```{r decision-tree plot}
+fancyRpartPlot(modelo_rpart$finalModel)
+```
+
+Además, se indica el parámetro ```cp=-1``` para que se explore el árbol entero, que aunque no se represente entero en el árbol dibujado, el modelo tendrá un mayor ajuste.
+
+```{r decision-tree mej, message=FALSE}
+# Parameters Tune Grid
+rpartParametersGrid <- expand.grid(.cp = -1)
+# Define model
+modelo_rpart_mejorado <- train(Label ~ .,
+                               data = training_set,
+                               method = "rpart",
+                               metric = "ROC",
+                               trControl = trClassCtrl,
+                               tuneGrid = rpartParametersGrid)
+
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rpart_mejorado, validation_set, 
+                                    type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rpart_mejorado, validation_set)
+```
+
+```{r decision-tree mej results}
+# Get AUC by ROC curve
+auc_rpart_mejorado <- roc(validation_set$Label, predictionValidationProb[["s"]], 
+                          levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rpart_mejorado, ylim=c(0,1), type = "S" , 
+                           print.thres = T, 
+                           main=paste('Validation AUC:', 
+                                      round(auc_rpart_mejorado$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rpart_mejorado <- confusionMatrix(predictionValidation, 
+                                      validation_set$Label)
+acc_rpart_mejorado$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rpart_mejorado$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+Y dibujamos el árbol:
+
+```{r decision-tree mej plot}
+fancyRpartPlot(modelo_rpart$finalModel)
+```
+
+
+### Random Forest
+
+El siguiente modelo a observar se trata de [Random Forest](https://en.wikipedia.org/wiki/Random_forest#:~:text=Random%20forests%20or%20random%20decision,average%20prediction%20(regression)%20of%20the), el cual dado un conjunto de datos, divide este por características de forma que se tome una decisión o su opuesta, para clasificar, formando varios árboles de decisión con decisiones diferentes. Tras crear una seria de árboles de decisión, el algoritmo se encarga de realizar una votación entre los distintos árboles para obtener un modelo final. Para ello se ha utilizado la librería [ranger](https://cran.r-project.org/web/packages/ranger/ranger.pdf), utilizando para ello la función [ranger](https://www.rdocumentation.org/packages/ranger/versions/0.12.1/topics/ranger) ya que es más eficiente que el método _randomForest_.
+
+Para la realización del modelo se escoge _sqrt(ncol(training_set))_ como número de variables seleccionadas aleatoriamente para la división (*mtry*), como regla de partición _gini_ ya que es la que existe por defecto para problemas de clasificación y un tamaño mínimo de nodos de 10 y 20 elementos tras estudiar y probar diferentes configuraciones del modelo.
+
+```{r random-forest, message=FALSE}
+# Define tune grid
+rfParametersGrid <- expand.grid(
+  .mtry = sqrt(ncol(training_set)),
+  .splitrule = "gini",
+  .min.node.size = c(10, 20)
+)
+# Define model
+modelo_rf <- train(Label ~ .,
+                   data = training_set,
+                   method = "ranger", 
+                   metric = "ROC", 
+                   trControl = trClassCtrl,
+                   tuneGrid = rfParametersGrid)
+
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rf, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rf, validation_set)
+```
+
+```{r random-forest results}
+# Get AUC by ROC curve
+auc_rf <- roc(validation_set$Label, predictionValidationProb[["s"]], 
+              levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rf, ylim=c(0,1), type = "S" , print.thres = T, 
+                           main=paste('Validation AUC:', 
+                                      round(auc_rf$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rf <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rf$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rf$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+
+### Redes Neuronales
+
+El tercer modelo seleccionado es el de [Red Neuronal Articifial](https://es.wikipedia.org/wiki/Red_neuronal_artificial), el cual recibe en las neuronas de entrada un conjunto de datos, que son procesados por las diferentes capas de neuronas ocultas (previamente configuradas) de la red, para obtener en la salida un modelo que a través del aprendizaje puede ajustarse mediante pesos al conjunto de datos.
+
+Para ello se ha utilizado la librería [nnet](https://cran.r-project.org/web/packages/nnet/nnet.pdf), empleando la función [nnet](https://www.rdocumentation.org/packages/nnet/versions/7.3-14/topics/nnet).
+
+Para la realización del modelo se han utilizado una serie de configuraciones distintas, primero la configuración por defecto:
+
+```{r nnet, message=FALSE}
+# Define model
+# Use capture.output to silent output of iterations
+silent <- capture.output(modelo_rna <- train(Label ~ ., 
+                                             data = training_set, 
+                                             method = "nnet",
+                                             metric = "ROC", 
+                                             trControl = trClassCtrl))
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rna, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rna, validation_set)
+```
+
+```{r nnet results}
+# Get AUC by ROC curve
+auc_rna <- roc(validation_set$Label, predictionValidationProb[["s"]], 
+               levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rna, ylim=c(0,1), type = "S" , print.thres = T, 
+                           main=paste('Validation AUC:', 
+                                      round(auc_rna$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rna <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rna$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rna$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+Y dibujamos la red neuronal:
+
+```{r nnet plot}
+plotnet(modelo_rna$finalModel, pos_col="green", neg_col="red", max_sp=TRUE)
+```
+
+A continuación se realiza una configuración con variaciones de los parámetros _size_ que representa el número de unidades en las capas ocultas y el parámetro _decay_ que es el parámetro de regularización para evitar el _overfitting_ o sobreajuste. Finalmente se opta por un modelo con _size_ 5 y _decay_ de 0.3.
+
+```{r nnet mej, message=FALSE}
+# Define tune grid
+nnetGrid <-  expand.grid(size = 5, decay = 0.3)
+# Train model
+silent <- capture.output(modelo_rna_mejorado <- train(Label ~ ., 
+                                                      data = training_set, 
+                                                      method = "nnet",
+                                                      metric = "ROC", 
+                                                      trControl = trClassCtrl,
+                                                      tuneGrid = nnetGrid))
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rna_mejorado, validation_set, 
+                                    type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rna_mejorado, validation_set)
+```
+
+```{r nnet mej results}
+# Get AUC by ROC curve
+auc_rna_mejorado <- roc(validation_set$Label, predictionValidationProb[["s"]], 
+                        levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rna_mejorado, ylim=c(0,1), type = "S" , 
+                           print.thres = T, 
+                           main=paste('Validation AUC:', 
+                                      round(auc_rna_mejorado$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rna_mejorado <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rna_mejorado$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rna_mejorado$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+Y dibujamos la red neuronal:
+
+```{r nnet mej plot}
+plotnet(modelo_rna_mejorado$finalModel, pos_col="green", neg_col="red", 
+        max_sp=TRUE)
+```
+
+### KNN
+
+El cuarto modelo seleccionado es el de [K-Nearest Neighbors](https://es.wikipedia.org/wiki/K_vecinos_m%C3%A1s_pr%C3%B3ximos), el cual dado un conjunto de entrada con diferentes clases, analiza si un elemento posee dentro de su rango más vecinos de una clase u otra, y clasifica en aquella clase en la que posea más vecinos dentro de un rango con *k* vecinos. Este modelo sigue una distribución espacial de los elementos.
+
+```{r knn, message=FALSE}
+# Define model
+modelo_knn <- train(Label ~ ., data = training_set, method = "knn", 
+                    metric = "ROC", trControl = trClassCtrl)
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_knn, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_knn, validation_set)
+```
+
+```{r knn results}
+# Get AUC by ROC curve
+auc_knn <- roc(validation_set$Label, predictionValidationProb[["s"]], 
+               levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_knn, ylim=c(0,1), type = "S" , print.thres = T, 
+                           main=paste('Validation AUC:', 
+                                      round(auc_knn$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_knn <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_knn$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_knn$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+### Naive Bayes
+
+El siguiente modelo seleccionado es el de [Naive Bayes](https://es.wikipedia.org/wiki/Clasificador_bayesiano_ingenuo), el cual asume que la presencia de una característica no es dependiente de la existencia de otra, permitiendo un entrenamiento del modelo mediante las frecuencias relativas de las características del conjunto de entrenamiento. Para ello crea un modelo que mezcla probabilidad y frecuencia, definiendo así las probabilidades de que se de una determinada clase a partir de sus características de forma independiente.
+
+Para ello se ha utilizado la librería [e1071](https://cran.r-project.org/web/packages/e1071/index.html), utilizando la función [naiveBayes](https://www.rdocumentation.org/packages/e1071/versions/1.7-3/topics/naiveBayes).
+
+```{r naive-bayes, message=FALSE}
+# Train model
+modelo_nb <- train(Label ~ ., data = training_set, method = "naive_bayes", 
+                   metric = "ROC", trControl = trClassCtrl)
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_nb, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_nb, validation_set)
+```
+
+```{r naive-bayes results}
+# Get AUC by ROC curve
+auc_nb <- roc(validation_set$Label, predictionValidationProb[["s"]], 
+              levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_nb, ylim=c(0,1), type = "S" , print.thres = T, 
+                           main=paste('Validation AUC:', 
+                                      round(auc_nb$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_nb <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_nb$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_nb$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+### GLM
+
+A continuación el siguiente modelo es [Generalized Linear Model](https://en.wikipedia.org/wiki/Generalized_linear_model#:~:text=In%20statistics%2C%20the%20generalized%20linear,other%20than%20a%20normal%20distribution.) el cual es una generalización de la regresión lineal, que permite responder mediante de modelos de distribución permitiendo que la variable de respuesta se relacion con un modelo lineal y que la magnitud de la varianza sea una función predictora.
+
+Para ello se ha utilizado la versión estándar del modelo _glm_ utilizando los valores por defecto:
+
+```{r glm, message=FALSE}
+# Train model
+modelo_glm <- train(Label ~ ., data = training_set, method = "glm", 
+                    metric = "ROC", trControl = trClassCtrl)
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_glm, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_glm, validation_set)
+```
+
+```{r glm results}
+# Get AUC by ROC curve
+auc_glm <- roc(validation_set$Label, predictionValidationProb[["s"]], 
+               levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_glm, ylim=c(0,1), type = "S" , print.thres = T,
+                           main=paste('Validation AUC:', 
+                                      round(auc_glm$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_glm <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_glm$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_glm$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+Tras realizar los diferentes modelos, se procede a visualizar una tabla comparativa del *accuracy* obtenido por los diferentes modelos:
+
+```{r}
+models_name <- c("Árbol de decisión", "Árbol de decisión mejorado",
+                 "Random Forest", "Red Neuronal Artificial",
+                 "Red Neuronal Artificial mejorado", "KNN",
+                 "Naive Bayes", "GLM")
+models_acc <- c(acc_rpart$overall["Accuracy"], 
+                acc_rpart_mejorado$overall["Accuracy"], 
+                acc_rf$overall["Accuracy"],
+                acc_rna$overall["Accuracy"],
+                acc_rna_mejorado$overall["Accuracy"],
+                acc_knn$overall["Accuracy"],
+                acc_nb$overall["Accuracy"],
+                acc_glm$overall["Accuracy"])
+models_auc <- c(auc_rpart$auc[1], 
+                auc_rpart_mejorado$auc[1], 
+                auc_rf$auc[1],
+                auc_rna$auc[1],
+                auc_rna_mejorado$auc[1],
+                auc_knn$auc[1],
+                auc_nb$auc[1],
+                auc_glm$auc[1])
+acc_table <- data.frame(models_name, models_acc, models_auc)
+names(acc_table) <- c("Modelos", "Accuracy", "AUC")
+kable(acc_table)
+```
+
+# Alternativas
+
+Nota: En las diferentes alternativas se van a repetir la ejecución de los mismos modelos con los mismos parámetros, por lo que se encontrará el código prácticamente idéntico al visto previamente. Finalmente se compararán los resultados de las distintas alternativas.
+
+## Utilización del conocimiento primitivo
+
+Este enfoque consiste en descartar todo el conocimiento derivado por los investigadores del conocimiento, suponiendo que este conecimiento pueda ser incorrecto o llevar a modelos erróneos debido a cualquier problema en el planteamiento del problema. Por lo tanto se trabajará únicamente con las variables primitivas, es decir, con los datos obtenidos tal cual del experimento.
+
+Previamente se obtienen los datos que ya han recibido una normalización, detección de outliers y eliminación de ruido.
+
+```{r primitivas}
+training_data <- training_data_raw
+# Delete DERivated columns
+training_data <- training_data[, -grep("DER", colnames(training_data))]
+```
+
+```{r particion3}
+set.seed(0)
+trainIndex <- createDataPartition(training_data$Label, p = .8, list = FALSE)
+training_set <- training_data[trainIndex, ]
+validation_set   <- training_data[-trainIndex, ]
+
+trClassCtrl <- trainControl(classProbs = TRUE, 
+                            summaryFunction = twoClassSummary, 
+                            method = "cv", number = 10,
+                            verboseIter = FALSE)
+```
+
+<!-- Árboles de decisión --> 
+
+```{r decision-tree3, include=FALSE}
+# Define model
+modelo_rpart <- train(Label ~ .,
+                      data = training_set,
+                      method = "rpart",
+                      metric = "ROC",
+                      trControl = trClassCtrl)
+
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rpart, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rpart, validation_set)
+```
+
+```{r decision-tree3 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rpart <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rpart, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rpart$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rpart <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rpart$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rpart$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r decision-tree plot3, include=FALSE}
+fancyRpartPlot(modelo_rpart$finalModel)
+```
+
+```{r decision-tree mej3, include=FALSE}
+# Parameters Tune Grid
+rpartParametersGrid <- expand.grid(.cp = -1)
+# Define model
+modelo_rpart_mejorado <- train(Label ~ .,
+                               data = training_set,
+                               method = "rpart",
+                               metric = "ROC",
+                               trControl = trClassCtrl,
+                               tuneGrid = rpartParametersGrid)
+
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rpart_mejorado, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rpart_mejorado, validation_set)
+```
+
+```{r decision-tree mej3 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rpart_mejorado <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rpart_mejorado, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rpart_mejorado$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rpart_mejorado <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rpart_mejorado$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rpart_mejorado$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r decision-tree mej plot3, include=FALSE}
+fancyRpartPlot(modelo_rpart$finalModel)
+```
+
+<!-- Random Forest -->
+
+```{r random-forest3, include=FALSE}
+# Define tune grid
+rfParametersGrid <- expand.grid(
+  .mtry = sqrt(ncol(training_set)),
+  .splitrule = "gini",
+  .min.node.size = c(10, 20)
+)
+# Define model
+modelo_rf <- train(Label ~ .,
+                   data = training_set,
+                   method = "ranger", 
+                   metric = "ROC", 
+                   trControl = trClassCtrl,
+                   tuneGrid = rfParametersGrid)
+
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rf, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rf, validation_set)
+```
+
+```{r random-forest3 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rf <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rf, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rf$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rf <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rf$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rf$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+<!-- Redes Neuronales -->
+
+```{r nnet3, include=FALSE}
+# Define model
+silent <- capture.output(modelo_rna <- train(Label ~ ., 
+                                             data = training_set, 
+                                             method = "nnet",
+                                             metric = "ROC", 
+                                             trControl = trClassCtrl))
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rna, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rna, validation_set)
+```
+
+```{r nnet3 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rna <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rna, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rna$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rna <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rna$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rna$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r nnet plot3, include=FALSE}
+plotnet(modelo_rna$finalModel, pos_col="green", neg_col="red", max_sp=TRUE)
+```
+
+```{r nnet mej3, include=FALSE}
+# Define tune grid
+nnetGrid <-  expand.grid(size = 5, decay = 0.3)
+# Train model
+silent <- capture.output(modelo_rna_mejorado <- train(Label ~ ., 
+                                                      data = training_set, 
+                                                      method = "nnet",
+                                                      metric = "ROC", 
+                                                      trControl = trClassCtrl,
+                                                      tuneGrid = nnetGrid))
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rna_mejorado, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rna_mejorado, validation_set)
+```
+
+```{r nnet mej3 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rna_mejorado <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rna_mejorado, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rna_mejorado$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rna_mejorado <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rna_mejorado$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rna_mejorado$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r nnet mej plot3, include=FALSE}
+plotnet(modelo_rna_mejorado$finalModel, pos_col="green", neg_col="red", max_sp=TRUE)
+```
+
+<!-- KNN --> 
+
+```{r knn3, include=FALSE}
+# Define model
+modelo_knn <- train(Label ~ ., data = training_set, method = "knn", 
+                    metric = "ROC", trControl = trClassCtrl)
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_knn, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_knn, validation_set)
+```
+
+```{r knn3 results, include=FALSE}
+# Get AUC by ROC curve
+auc_knn <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_knn, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_knn$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_knn <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_knn$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_knn$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+<!-- Naive Bayes --> 
+
+```{r naive-bayes3, include=FALSE}
+# Train model
+modelo_nb <- train(Label ~ ., data = training_set, method = "naive_bayes", 
+                   metric = "ROC", trControl = trClassCtrl)
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_nb, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_nb, validation_set)
+```
+
+```{r naive-bayes3 results, include=FALSE}
+# Get AUC by ROC curve
+auc_nb <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_nb, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_nb$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_nb <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_nb$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_nb$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+<!-- GLM --> 
+
+```{r glm3, include=FALSE}
+# Train model
+modelo_glm <- train(Label ~ ., data = training_set, method = "glm", 
+                    metric = "ROC", trControl = trClassCtrl)
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_glm, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_glm, validation_set)
+```
+
+```{r glm3 results, include=FALSE}
+# Get AUC by ROC curve
+auc_glm <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_glm, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_glm$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_glm <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_glm$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_glm$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r, echo=FALSE}
+models_name <- c("Árbol de decisión", "Árbol de decisión mejorado",
+                 "Random Forest", "Red Neuronal Artificial",
+                 "Red Neuronal Artificial mejorado", "KNN",
+                 "Naive Bayes", "GLM")
+models_acc <- c(acc_rpart$overall["Accuracy"], 
+                acc_rpart_mejorado$overall["Accuracy"], 
+                acc_rf$overall["Accuracy"],
+                acc_rna$overall["Accuracy"],
+                acc_rna_mejorado$overall["Accuracy"],
+                acc_knn$overall["Accuracy"],
+                acc_nb$overall["Accuracy"],
+                acc_glm$overall["Accuracy"])
+models_auc <- c(auc_rpart$auc[1], 
+                auc_rpart_mejorado$auc[1], 
+                auc_rf$auc[1],
+                auc_rna$auc[1],
+                auc_rna_mejorado$auc[1],
+                auc_knn$auc[1],
+                auc_nb$auc[1],
+                auc_glm$auc[1])
+acc_table_alt_2 <- data.frame(models_name, models_acc, models_auc)
+names(acc_table_alt_2) <- c("Modelos", "Accuracy", "AUC")
+kable(acc_table_alt_2)
+```
+
+## Utilización del conocimiento derivado
+
+Este enfoque consiste en descartar todo el conocimiento primitivo del problema, suponiendo que el conocimiento derivado por los investigadores aporta una información más precisa acerca del problema, y que el uso de datos primitivos puede llevar a conclusiones erróneas. Por lo tanto se trabajará únicamente con las variables derivadas, es decir, con los datos obtenidos tras el procesamiento de los investigadores.
+
+Previamente se obtienen los datos que ya han recibido una normalización, detección de outliers y eliminación de ruido.
+
+```{r derivadas}
+training_data <- training_data_raw
+# Delete PRImitive columns
+training_data <- training_data[, -grep("PRI", colnames(training_data))]
+```
+
+```{r particion4}
+set.seed(0)
+trainIndex <- createDataPartition(training_data$Label, p = .8, list = FALSE)
+training_set <- training_data[trainIndex, ]
+validation_set   <- training_data[-trainIndex, ]
+
+trClassCtrl <- trainControl(classProbs = TRUE, 
+                            summaryFunction = twoClassSummary, 
+                            method = "cv", number = 10,
+                            verboseIter=FALSE)
+```
+
+<!-- Árboles de decisión --> 
+
+```{r decision-tree4, include=FALSE}
+# Define model
+modelo_rpart <- train(Label ~ .,
+                      data = training_set,
+                      method = "rpart",
+                      metric = "ROC",
+                      trControl = trClassCtrl)
+
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rpart, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rpart, validation_set)
+```
+
+```{r decision-tree4 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rpart <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rpart, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rpart$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rpart <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rpart$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rpart$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r decision-tree plot4, include=FALSE}
+fancyRpartPlot(modelo_rpart$finalModel)
+```
+
+```{r decision-tree mej4, include=FALSE}
+# Parameters Tune Grid
+rpartParametersGrid <- expand.grid(.cp = -1)
+# Define model
+modelo_rpart_mejorado <- train(Label ~ .,
+                               data = training_set,
+                               method = "rpart",
+                               metric = "ROC",
+                               trControl = trClassCtrl,
+                               tuneGrid = rpartParametersGrid)
+
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rpart_mejorado, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rpart_mejorado, validation_set)
+```
+
+```{r decision-tree mej4 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rpart_mejorado <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rpart_mejorado, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rpart_mejorado$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rpart_mejorado <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rpart_mejorado$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rpart_mejorado$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r decision-tree mej plot4, include=FALSE}
+fancyRpartPlot(modelo_rpart$finalModel)
+```
+
+<!-- Random Forest --> 
+
+```{r random-forest4, include=FALSE}
+# Define tune grid
+rfParametersGrid <- expand.grid(
+  .mtry = sqrt(ncol(training_set)),
+  .splitrule = "gini",
+  .min.node.size = c(10, 20)
+)
+# Define model
+modelo_rf <- train(Label ~ .,
+                   data = training_set,
+                   method = "ranger", 
+                   metric = "ROC", 
+                   trControl = trClassCtrl,
+                   tuneGrid = rfParametersGrid)
+
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rf, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rf, validation_set)
+```
+
+```{r random-forest4 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rf <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rf, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rf$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rf <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rf$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rf$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+<!-- Redes Neuronales --> 
+
+```{r nnet4, include=FALSE}
+# Define model
+silent <- capture.output(modelo_rna <- train(Label ~ ., 
+                                             data = training_set, 
+                                             method = "nnet",
+                                             metric = "ROC", 
+                                             trControl = trClassCtrl))
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rna, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rna, validation_set)
+```
+
+```{r nnet4 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rna <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rna, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rna$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rna <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rna$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rna$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r nnet plot4, include=FALSE}
+plotnet(modelo_rna$finalModel, pos_col="green", neg_col="red", max_sp=TRUE)
+```
+
+```{r nnet mej4, include=FALSE}
+# Define tune grid
+nnetGrid <-  expand.grid(size = 5, decay = 0.3)
+# Train model
+silent <- capture.output(modelo_rna_mejorado <- train(Label ~ ., 
+                                                      data = training_set, 
+                                                      method = "nnet",
+                                                      metric = "ROC", 
+                                                      trControl = trClassCtrl,
+                                                      tuneGrid = nnetGrid))
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rna_mejorado, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rna_mejorado, validation_set)
+```
+
+```{r nnet4 mej4 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rna_mejorado <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rna_mejorado, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rna_mejorado$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rna_mejorado <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rna_mejorado$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rna_mejorado$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r nnet mej plot4, include=FALSE}
+plotnet(modelo_rna_mejorado$finalModel, pos_col="green", neg_col="red", max_sp=TRUE)
+```
+
+<!-- KNN --> 
+
+```{r knn4, include=FALSE}
+# Define model
+modelo_knn <- train(Label ~ ., data = training_set, method = "knn", 
+                    metric = "ROC", trControl = trClassCtrl)
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_knn, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_knn, validation_set)
+```
+
+```{r knn4 results, include=FALSE}
+# Get AUC by ROC curve
+auc_knn <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_knn, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_knn$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_knn <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_knn$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_knn$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+<!-- Naive Bayes --> 
+
+```{r naive-bayes4, include=FALSE}
+# Train model
+modelo_nb <- train(Label ~ ., data = training_set, method = "naive_bayes", 
+                   metric = "ROC", trControl = trClassCtrl)
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_nb, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_nb, validation_set)
+```
+
+```{r naive-bayes4 results, include=FALSE}
+# Get AUC by ROC curve
+auc_nb <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_nb, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_nb$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_nb <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_nb$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_nb$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+<!-- GLM --> 
+
+```{r glm4, include=FALSE}
+# Train model
+modelo_glm <- train(Label ~ ., data = training_set, method = "glm", 
+                    metric = "ROC", trControl = trClassCtrl)
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_glm, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_glm, validation_set)
+```
+
+```{r glm4 results, include=FALSE}
+# Get AUC by ROC curve
+auc_glm <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_glm, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_glm$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_glm <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_glm$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_glm$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r, echo=FALSE}
+models_name <- c("Árbol de decisión", "Árbol de decisión mejorado",
+                 "Random Forest", "Red Neuronal Artificial",
+                 "Red Neuronal Artificial mejorado", "KNN",
+                 "Naive Bayes", "GLM")
+models_acc <- c(acc_rpart$overall["Accuracy"], 
+                acc_rpart_mejorado$overall["Accuracy"], 
+                acc_rf$overall["Accuracy"],
+                acc_rna$overall["Accuracy"],
+                acc_rna_mejorado$overall["Accuracy"],
+                acc_knn$overall["Accuracy"],
+                acc_nb$overall["Accuracy"],
+                acc_glm$overall["Accuracy"])
+models_auc <- c(auc_rpart$auc[1], 
+                auc_rpart_mejorado$auc[1], 
+                auc_rf$auc[1],
+                auc_rna$auc[1],
+                auc_rna_mejorado$auc[1],
+                auc_knn$auc[1],
+                auc_nb$auc[1],
+                auc_glm$auc[1])
+acc_table_alt_3 <- data.frame(models_name, models_acc, models_auc)
+names(acc_table_alt_3) <- c("Modelos", "Accuracy", "AUC")
+kable(acc_table_alt_3)
+```
+
+## Selección aleatoria de instancias
+
+Esta alternativa consiste en obtener un subconjunto de instancias aleatorias para realizar los diferentes modelos, para ello se ha de obtener un conjunto de datos lo suficientemente grande para evitar un sobreajuste sobre un modelo pequeño de los datos. Por lo tanto tras realizar puebas se ha optado pasar del conjunto de 66.246 datos que se tenían en un principio en el modelo inicial a un total de 10.000 datos escogidos aleatoriamente.
+
+Para realizar la selección de subconjuntos de datos se va a emplear la función [sample_n](https://dplyr.tidyverse.org/reference/sample.html) del paquete [tidyverse](https://www.tidyverse.org/).
+
+```{r aleatoria}
+training_data <- training_data_raw
+# Random subset
+training_data <- sample_n(training_data, size=1000)
+```
+
+```{r particion5}
+set.seed(0)
+trainIndex <- createDataPartition(training_data$Label, p = .8, list = FALSE)
+training_set <- training_data[trainIndex, ]
+validation_set   <- training_data[-trainIndex, ]
+
+trClassCtrl <- trainControl(classProbs = TRUE, 
+                            summaryFunction = twoClassSummary, 
+                            method = "cv", number = 10,
+                            verboseIter=FALSE)
+```
+
+<!-- Árboles de decisión --> 
+
+```{r decision-tree5, include=FALSE}
+# Define model
+modelo_rpart <- train(Label ~ .,
+                      data = training_set,
+                      method = "rpart",
+                      metric = "ROC",
+                      trControl = trClassCtrl)
+
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rpart, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rpart, validation_set)
+```
+
+```{r decision-tree5 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rpart <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rpart, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rpart$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rpart <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rpart$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rpart$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r decision-tree plot5, include=FALSE}
+fancyRpartPlot(modelo_rpart$finalModel)
+```
+
+```{r decision-tree mej5, include=FALSE}
+# Parameters Tune Grid
+rpartParametersGrid <- expand.grid(.cp = -1)
+# Define model
+modelo_rpart_mejorado <- train(Label ~ .,
+                               data = training_set,
+                               method = "rpart",
+                               metric = "ROC",
+                               trControl = trClassCtrl,
+                               tuneGrid = rpartParametersGrid)
+
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rpart_mejorado, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rpart_mejorado, validation_set)
+```
+
+```{r decision-tree mej5 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rpart_mejorado <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rpart_mejorado, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rpart_mejorado$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rpart_mejorado <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rpart_mejorado$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rpart_mejorado$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r decision-tree mej plot5, include=FALSE}
+fancyRpartPlot(modelo_rpart$finalModel)
+```
+
+<!-- Random Forest --> 
+
+```{r random-forest5, include=FALSE}
+# Define tune grid
+rfParametersGrid <- expand.grid(
+  .mtry = sqrt(ncol(training_set)),
+  .splitrule = "gini",
+  .min.node.size = c(10, 20)
+)
+# Define model
+modelo_rf <- train(Label ~ .,
+                   data = training_set,
+                   method = "ranger", 
+                   metric = "ROC", 
+                   trControl = trClassCtrl,
+                   tuneGrid = rfParametersGrid)
+
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rf, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rf, validation_set)
+```
+
+```{r random-forest5 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rf <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rf, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rf$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rf <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rf$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rf$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+<!-- Redes Neuronales --> 
+
+```{r nnet5, include=FALSE}
+# Define model
+silent <- capture.output(modelo_rna <- train(Label ~ ., 
+                                             data = training_set, 
+                                             method = "nnet",
+                                             metric = "ROC", 
+                                             trControl = trClassCtrl))
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rna, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rna, validation_set)
+```
+
+```{r nnet5 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rna <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rna, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rna$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rna <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rna$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rna$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r nnet plot5, include=FALSE}
+plotnet(modelo_rna$finalModel, pos_col="green", neg_col="red", max_sp=TRUE)
+```
+
+```{r nnet mej5, include=FALSE}
+# Define tune grid
+nnetGrid <-  expand.grid(size = 5, decay = 0.3)
+# Train model
+silent <- capture.output(modelo_rna_mejorado <- train(Label ~ ., 
+                                                      data = training_set,
+                                                      method = "nnet", 
+                                                      metric = "ROC",
+                                                      trControl = trClassCtrl, 
+                                                      tuneGrid = nnetGrid))
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rna_mejorado, validation_set, 
+                                    type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rna_mejorado, validation_set)
+```
+
+```{r nnet mej5 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rna_mejorado <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rna_mejorado, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rna_mejorado$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rna_mejorado <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rna_mejorado$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rna_mejorado$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r nnet mej plot5, include=FALSE}
+plotnet(modelo_rna_mejorado$finalModel, pos_col="green", neg_col="red", max_sp=TRUE)
+```
+
+<!-- KNN --> 
+
+```{r knn5, include=FALSE}
+# Define model
+modelo_knn <- train(Label ~ ., data = training_set, method = "knn", 
+                    metric = "ROC", trControl = trClassCtrl)
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_knn, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_knn, validation_set)
+```
+
+```{r knn5 results, include=FALSE}
+# Get AUC by ROC curve
+auc_knn <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_knn, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_knn$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_knn <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_knn$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_knn$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+<!-- Naive Bayes --> 
+
+```{r naive-bayes5, include=FALSE}
+# Train model
+modelo_nb <- train(Label ~ ., data = training_set, method = "naive_bayes", 
+                   metric = "ROC", trControl = trClassCtrl)
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_nb, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_nb, validation_set)
+```
+
+```{r naive-bayes5 results, include=FALSE}
+# Get AUC by ROC curve
+auc_nb <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_nb, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_nb$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_nb <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_nb$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_nb$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+<!-- GLM --> 
+
+```{r glm5, include=FALSE}
+# Train model
+modelo_glm <- train(Label ~ ., data = training_set, method = "glm", 
+                    metric = "ROC", trControl = trClassCtrl)
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_glm, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_glm, validation_set)
+```
+
+```{r glm5 results, include=FALSE}
+# Get AUC by ROC curve
+auc_glm <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_glm, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_glm$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_glm <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_glm$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_glm$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r, echo=FALSE}
+models_name <- c("Árbol de decisión", "Árbol de decisión mejorado",
+                 "Random Forest", "Red Neuronal Artificial",
+                 "Red Neuronal Artificial mejorado", "KNN",
+                 "Naive Bayes", "GLM")
+models_acc <- c(acc_rpart$overall["Accuracy"], 
+                acc_rpart_mejorado$overall["Accuracy"], 
+                acc_rf$overall["Accuracy"],
+                acc_rna$overall["Accuracy"],
+                acc_rna_mejorado$overall["Accuracy"],
+                acc_knn$overall["Accuracy"],
+                acc_nb$overall["Accuracy"],
+                acc_glm$overall["Accuracy"])
+models_auc <- c(auc_rpart$auc[1], 
+                auc_rpart_mejorado$auc[1], 
+                auc_rf$auc[1],
+                auc_rna$auc[1],
+                auc_rna_mejorado$auc[1],
+                auc_knn$auc[1],
+                auc_nb$auc[1],
+                auc_glm$auc[1])
+acc_table_alt_4 <- data.frame(models_name, models_acc, models_auc)
+names(acc_table_alt_4) <- c("Modelos", "Accuracy", "AUC")
+kable(acc_table_alt_4)
+```
+
+### Realizar un balanceo de datos
+
+Esta alternativa consiste en realizar un submuestreo aleatorio de la clase mayoritaria (ruido) hasta obtener un conjunto de datos balanceado con el mismo número de eventos para cada clase. Para ello se utilizará el conjunto de datos del procedimiento inicial (con el conjunto de características reducidas).
+
+Para realizar este _down-sampling_ se utilizará la función [downSample](https://topepo.github.io/caret/subsampling-for-class-imbalances.html) de _caret_.
+
+```{r subsample}
+training_data <- training_data_saved
+training_data <- downSample(training_data, training_data$Label)
+# Delete class column generated
+training_data[,"Class"] <- NULL
+plot_bar(training_data)
+```
+
+```{r particion6}
+set.seed(0)
+trainIndex <- createDataPartition(training_data$Label, p = .8, list = FALSE)
+training_set <- training_data[trainIndex, ]
+validation_set   <- training_data[-trainIndex, ]
+
+trClassCtrl <- trainControl(classProbs = TRUE, 
+                            summaryFunction = twoClassSummary, 
+                            method = "cv", number = 10,
+                            verboseIter=FALSE)
+```
+
+<!-- Árboles de decisión --> 
+
+```{r decision-tree6, include=FALSE}
+# Define model
+modelo_rpart <- train(Label ~ .,
+                      data = training_set,
+                      method = "rpart",
+                      metric = "ROC",
+                      trControl = trClassCtrl)
+
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rpart, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rpart, validation_set)
+```
+
+```{r decision-tree6 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rpart <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rpart, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rpart$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rpart <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rpart$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rpart$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r decision-tree plot6, include=FALSE}
+fancyRpartPlot(modelo_rpart$finalModel)
+```
+
+```{r decision-tree mej6, include=FALSE}
+# Parameters Tune Grid
+rpartParametersGrid <- expand.grid(.cp = -1)
+# Define model
+modelo_rpart_mejorado <- train(Label ~ .,
+                               data = training_set,
+                               method = "rpart",
+                               metric = "ROC",
+                               trControl = trClassCtrl,
+                               tuneGrid = rpartParametersGrid)
+
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rpart_mejorado, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rpart_mejorado, validation_set)
+```
+
+```{r decision-tree mej6 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rpart_mejorado <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rpart_mejorado, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rpart_mejorado$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rpart_mejorado <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rpart_mejorado$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rpart_mejorado$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r decision-tree mej plot6, include=FALSE}
+fancyRpartPlot(modelo_rpart$finalModel)
+```
+
+<!-- Random Forest --> 
+
+```{r random-forest6, include=FALSE}
+# Define tune grid
+rfParametersGrid <- expand.grid(
+  .mtry = sqrt(ncol(training_set)),
+  .splitrule = "gini",
+  .min.node.size = c(10, 20)
+)
+# Define model
+modelo_rf <- train(Label ~ .,
+                   data = training_set,
+                   method = "ranger", 
+                   metric = "ROC", 
+                   trControl = trClassCtrl,
+                   tuneGrid = rfParametersGrid)
+
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rf, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rf, validation_set)
+```
+
+```{r random-forest6 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rf <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rf, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rf$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rf <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rf$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rf$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+<!-- Redes Neuronales --> 
+
+```{r nnet6, include=FALSE}
+# Define model
+silent <- capture.output(modelo_rna <- train(Label ~ ., 
+                                             data = training_set, 
+                                             method = "nnet",
+                                             metric = "ROC", 
+                                             trControl = trClassCtrl))
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rna, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rna, validation_set)
+```
+
+```{r nnet6 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rna <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rna, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rna$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rna <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rna$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rna$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r nnet plot6, include=FALSE}
+plotnet(modelo_rna$finalModel, pos_col="green", neg_col="red", max_sp=TRUE)
+```
+
+```{r nnet mej6, include=FALSE}
+# Define tune grid
+nnetGrid <-  expand.grid(size = 5, decay = 0.3)
+# Train model
+silent <- capture.output(modelo_rna_mejorado <- train(Label ~ ., 
+                                                      data = training_set, 
+                                                      method = "nnet",
+                                                      metric = "ROC", 
+                                                      trControl = trClassCtrl,
+                                                      tuneGrid = nnetGrid))
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_rna_mejorado, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_rna_mejorado, validation_set)
+```
+
+```{r nnet mej6 results, include=FALSE}
+# Get AUC by ROC curve
+auc_rna_mejorado <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_rna_mejorado, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_rna_mejorado$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_rna_mejorado <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_rna_mejorado$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_rna_mejorado$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r nnet mej plot6, include=FALSE}
+plotnet(modelo_rna_mejorado$finalModel, pos_col="green", neg_col="red", max_sp=TRUE)
+```
+
+<!-- KNN --> 
+
+```{r knn6, include=FALSE}
+# Define model
+modelo_knn <- train(Label ~ ., data = training_set, method = "knn", 
+                    metric = "ROC", trControl = trClassCtrl)
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_knn, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_knn, validation_set)
+```
+
+```{r knn6 results, include=FALSE}
+# Get AUC by ROC curve
+auc_knn <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_knn, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_knn$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_knn <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_knn$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_knn$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+<!-- Naive Bayes --> 
+
+```{r naive-bayes6, include=FALSE}
+# Train model
+modelo_nb <- train(Label ~ ., data = training_set, method = "naive_bayes", 
+                   metric = "ROC", trControl = trClassCtrl)
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_nb, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_nb, validation_set)
+```
+
+```{r naive-bayes6 results, include=FALSE}
+# Get AUC by ROC curve
+auc_nb <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_nb, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_nb$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_nb <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_nb$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_nb$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+<!-- GLM --> 
+
+```{r glm6, include=FALSE}
+# Train model
+modelo_glm <- train(Label ~ ., data = training_set, method = "glm", 
+                    metric = "ROC", trControl = trClassCtrl)
+# Get prediction validation probabilities
+predictionValidationProb <- predict(modelo_glm, validation_set, type = "prob")
+# Get prediction validation
+predictionValidation <- predict(modelo_glm, validation_set)
+```
+
+```{r glm6 results, include=FALSE}
+# Get AUC by ROC curve
+auc_glm <- roc(validation_set$Label, predictionValidationProb[["s"]], levels = unique(validation_set[["Label"]]))
+roc_validation <- plot.roc(auc_glm, ylim=c(0,1), type = "S" , print.thres = T, main=paste('Validation AUC:', round(auc_glm$auc[[1]], 2)))
+
+# Get accuracy by confusion matrix
+acc_glm <- confusionMatrix(predictionValidation, validation_set$Label)
+acc_glm$overall["Accuracy"]
+# Plot confusion matrix
+matrix_table <- data.frame(acc_glm$table)
+ggplot(matrix_table, aes(x=Prediction, y=Reference, fill=Freq)) + geom_tile()
+```
+
+```{r, echo=FALSE}
+models_name <- c("Árbol de decisión", "Árbol de decisión mejorado",
+                 "Random Forest", "Red Neuronal Artificial",
+                 "Red Neuronal Artificial mejorado", "KNN",
+                 "Naive Bayes", "GLM")
+models_acc <- c(acc_rpart$overall["Accuracy"], 
+                acc_rpart_mejorado$overall["Accuracy"], 
+                acc_rf$overall["Accuracy"],
+                acc_rna$overall["Accuracy"],
+                acc_rna_mejorado$overall["Accuracy"],
+                acc_knn$overall["Accuracy"],
+                acc_nb$overall["Accuracy"],
+                acc_glm$overall["Accuracy"])
+models_auc <- c(auc_rpart$auc[1], 
+                auc_rpart_mejorado$auc[1], 
+                auc_rf$auc[1],
+                auc_rna$auc[1],
+                auc_rna_mejorado$auc[1],
+                auc_knn$auc[1],
+                auc_nb$auc[1],
+                auc_glm$auc[1])
+acc_table_alt_5 <- data.frame(models_name, models_acc, models_auc)
+names(acc_table_alt_5) <- c("Modelos", "Accuracy", "AUC")
+kable(acc_table_alt_5)
+```
+
+# Comparativas de diferentes planteamientos
+
+## Planteamiento inicial:
+
+```{r}
+kable(acc_table)
+```
+
+## Utilización de conocimiento primitivo
+
+```{r}
+kable(acc_table_alt_2)
+```
+
+## Utilización de conocimiento derivado
+
+```{r}
+kable(acc_table_alt_3)
+```
+
+## Selección aleatoria de instancias
+
+```{r}
+kable(acc_table_alt_4)
+```
+
+## Realizar un balanceo de datos
+
+```{r}
+kable(acc_table_alt_5)
+```
+
+# Conclusiones
+
+Tras analizar los datos, realizar un análisis exploratorio, realizar un preprocesamiento de los datos y finalmente realizar varios modelos, se han extraido una serie de conclusiones sobre el problema planteado. Además, realizar diferentes alternativas que se han considerado oportunos nos permiten también extraer una nueva fuente de información de cara a posibles conclusiones adicionales que también se han valorado.
+
+Tras analizar los diferentes modelos, se han extraído las siguientes conclusiones:
+
+* Un modelo de *árboles de decisión* simple no llega a obtener unos grandes resultados pese a tener un rendimiento aceptable. Sin embargo, emplear diferentes parámetros o llegar a explorar todo el árbol en su profundidad (con el parámetro _cp=-1_) nos permite observar la potencia de esta herramienta y alcanzar unos buenos resultados que saben distinguir los bosones del ruido.
+* El modelo con mejores resultados es *Random Forest*, ya que con su promedio de árboles de decisión, y sus diferenetes decisiones, es capaz de crear un modelo complejo que representa correctamente el conjunto de datos, llegando a obtener en torno a un 90% de acierto en los datos de entrenamiento que se han empleado en este trabajo.
+* El modelo de *Red Neuronal* obtiene también grandes resultados, aunque en diferentes alternativas la mejora de parámetros obtiene mejores o peores resultados, por lo que en este problema la parametrización o bien no ha sido la óptima, o bien no llega a producir una diferencia notable en la clasificación. Sin embargo en base al coste computacional del algoritmo y los resultados obtenidos, sería una gran segunda opción por detrás del previamente mencionado *Random Forest*.
+* Los modelos de *KNN*, *Naive Bayes* y *GLM* si bien obtienen unos resultados aceptables, al tratarse de modelos muy simples no llegan a comprender la complejidad del conjunto de datos y obtienen unos resultados considerablemente inferiores al resto de modelos más complejos, por lo que no serían una opción aceptable.
+
+Por otro lado, tras analizar las diferentes alternativas, se puede extraer que:
+
+* El mejor resultado se produce en la alternativa que solo contempla las variables derivadas, es decir, la información aportada por los expertos, por lo que quizás un mayor estudio y la utilización de datos expertos podría conllevar una mejora en la predicción de bosones. Con el conjunto de entrenamiento se ha llegado a alcanzar una precisión del 91,59%.
+* El peor resultado de promedio se ha obtenido en la alternativa del conocimiento primitivo exclusivamente, por lo que se puede concluir con que es necesario un análisis de los datos por los expertos de cara a poder obtener información más fiable y que permita deducir la predicción de un bosón con mayor exactitud.
+* Se produce una mejora en la selección aleatoria de instancias, de la cual se puede deducir que ciertos subconjuntos de datos pueden llegar a ser más prometedores que otros de cara a una predicción y quizás se debería estudiar posibles relaciones entre los datos.
+* Si bien con el balanceo de datos no se llega a producir una mejora significativa de los resultados, nos da una mayor fiabilidad de cara a evitar posibles etiquetados erróneos, lo cual es positivo frente al desconocimiento de este aspecto sobre el planteamiento inicial.
+
+Finalmente, para concluir cabe indicar la importancia de la reducción de datos en las fases de supresión de valores perdidos y detección de outliers. Quizás empleando técnicas de discretización se podrían alcanzar mejores resultados pero requiere de un conocimiento previo de la materia que no se posee como se explica en dicho apartado. 
+
+Cabe destacar finalmente que se trata de un problema con un alto coste computacional y que ha requerido cierto tiempo al haberse entrenado tantos modelos y en tantas alternativas, por lo que quizás este tipo de problemas sería mejor afrontarlos desde una máquina preparada para ello, ya que cada ejecución en un ordenador personal con unos buenos componentes de promedio podría alcanzar unos tres cuartos de hora, siendo unos resultados inviables en un ámbito más profesional.
+
+# Bibliografía
+
+[1] [Repositorio oficial de Caret en GitHub](https://github.com/topepo/caret).
+
+[2] [Outlier Treatment](http://r-statistics.co/Outlier-Treatment-With-R.html) - Selva Prabhakaran.
+
+[3] [NoiseFilterR Package](https://cran.r-project.org/web/packages/NoiseFiltersR/vignettes/NoiseFiltersR.pdf).
+
+[4] [How, When, and Why Should You Normalize / Standardize / Rescale Your Data?](https://towardsai.net/p/data-science/how-when-and-why-should-you-normalize-standardize-rescale-your-data-3f083def38ff)
+
+[5] [ols_step_both_p: Stepwise regression](https://www.rdocumentation.org/packages/olsrr/versions/0.5.3/topics/ols_step_both_p).
+
+[6] [rpart: Recursive Partitioning and Regression Trees](https://www.rdocumentation.org/packages/rpart/versions/4.1-15/topics/rpart).
+
+[7] [ranger: Ranger](https://www.rdocumentation.org/packages/ranger/versions/0.12.1/topics/ranger).
+
+[8] [nnet: Fit Neural Networks](https://www.rdocumentation.org/packages/nnet/versions/7.3-15/topics/nnet).
+
+[9] [kNN: k-Nearest Neighbour Classification](https://www.rdocumentation.org/packages/DMwR/versions/0.4.1/topics/kNN).
+
+[10] [ejemplo naive Bayes](https://rpubs.com/mao045/485540) - Mauro Valencia.
+
+[11] [Modelos lineales generalizados](https://rpubs.com/JessicaP/459130) - Jessica Nathaly Pulzara Mora.
+
+[12] [Sample n rows from a table](https://dplyr.tidyverse.org/reference/sample.html).
+
+[13] [Subsampling For Class Imbalances](https://topepo.github.io/caret/subsampling-for-class-imbalances.html).

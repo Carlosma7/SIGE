@@ -1,0 +1,405 @@
+---
+title: "TidyModels"
+author: "Carlos Morales Aguilera"
+date: "29/4/2021"
+output:
+    pdf_document: 
+      toc: yes
+      number_sections: yes
+      latex_engine: xelatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introducción
+
+Dentro del ámbito de Machine Learning, Data Mining o estadística, **R** es uno de los principales lenguajes de programación, al tratarse de un software orientado a este tipo de labores, y con una gran variedad de bibliotecas que facilitan las funcionalidades deseadas. Por otro lado, la utilización de diferentes librerías requiere una gran curva de aprendizaje ya que cada una funciona de manera diferente.
+
+Existen librerías como **caret** o **tidyverse** que pretenden solventar este problema proporcionando una interfaz que bajo un único marco se unifiquen los procedimientos de diferentes librerías. En este caso hablamos dentro del contexto de **tidyverse**, donde encontramos **Tidymodels**. Esta librería es una interfaz que reúne bajo un marco único funciones de diferentes paquetes que facilitan las diferentes etapas de Preprocesamiento, Entrenamiento de modelos, Optimización y Validación de modelos predictivos.
+
+Por otro lado, se puede encontrar una separación de esta librería en diferentes paquetes como son:
+
+** **rsample** - Operaciones asociadas a muestreos de los datos.
+** **recipes** - Operación y organización de las diferentes técnicas de preprocesamiento.
+** **parnsip** - Modelado y entrenamiento de diferentes modelos de distintos paquetes.
+** **tune** - Operaciones de _tuning_ de modelos predictivos.
+** **yardstick** - Operaciones de métricas de modelos.
+** **workflows** - Combinación de procesos en un único flujo de trabajo.
+
+
+```{r warning=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(titanic)
+library(skimr)
+library(DataExplorer)
+```
+
+# Datos
+
+El conjunto de datos del **Titanic** describe el estado de supervivencia de pasajeros individuales
+en el Titanic. No contiene información de la tripulación, pero contiene edades reales de la mitad de los pasajeros. La principal fuente de datos sobre Pasajeros del Titanic es la denominada Enciclopedia Titanica. Los conjuntos de datos utilizados aquí fueron iniciados por una variedad de investigadores.
+
+Descripción de variables:
+
+** **Pclass** Passenger Class (1 = 1st; 2 = 2nd; 3 = 3rd)
+** **survived** Survived (0 = No; 1 = Yes)
+** **name** Name
+** **sex** Sex
+** **age** Age
+** **sibsp** Number of Siblings/Spouses Aboard
+** **parch** Number of Parents/Children Aboard
+** **ticket** Ticket Number
+** **fare** Passenger Fare (British pound)
+** **cabin** Cabin
+** **embarked** Port of Embarkation (C = Cherbourg; Q = Queenstown; S = Southampton)
+
+## Lectura de datos
+
+Se utiliza la librería `titanic`:
+
+```{r}
+train <- read_csv("https://raw.githubusercontent.com/agconti/kaggle-titanic/master/data/train.csv")
+train$Survived <- as.factor(train$Survived)
+```
+
+# Análisis exploratorio
+
+Antes de realizar las labores para las que está diseñado **Tidymodels**, se procede a realizar un sencillo análisis exploratorio para poder observar la distribución y relaciones de los datos.
+
+## Resumen inicial
+
+```{r}
+skim(train)
+```
+
+
+## Valores perdidos
+
+```{r}
+plot_missing(
+  data    = train, 
+  title   = "Porcentaje de valores ausentes",
+  ggtheme = theme_bw(),
+  theme_config = list(legend.position = "none")
+)
+```
+
+## Correlación de variables
+
+```{r}
+plot_correlation(
+  data = train,
+  type = "continuous",
+  title = "Matriz de correlación variables continuas",
+  theme_config = list(legend.position = "none",
+                      plot.title = element_text(size = 16, face = "bold"),
+                      axis.title = element_blank(),
+                      axis.text.x = element_text(angle = -45, hjust = +0.1)
+                     )
+)
+```
+
+## Balanceo de variables
+
+```{r, warning=FALSE}
+plot_bar(
+  train,
+  ncol    = 3,
+  title   = "Número de observaciones por grupo",
+  ggtheme = theme_bw(),
+  theme_config = list(
+                   plot.title = element_text(size = 16, face = "bold"),
+                   strip.text = element_text(colour = "black", size = 12, face = 2),
+                   legend.position = "none"
+                  )
+)
+```
+
+# Particionamiento de datos
+
+Como en cualquier problema que se aborda, es necesario tener un conjunto de datos de muestra sobre el que aprender o de **entrenamiento** y otro de comprobación o **test**. Para realizar esta funcionalidad se suelen utilizar diferentes opciones de particionamiento. **Tidymodels** ofrece su propio paquete **rsample**, el cual se encarga de hacer esta partición ajustándose a los datos dada una proporción.
+
+Para esta función se utiliza la función **initial_split()** a la que entre otras partes se puede asignar tanto una proporción como la variable que se utiliza para estratificar los submuestreos. En nuestro caso `Survived`. Vamos a realizar una proporción del 80\%-20\% para entrenamiento-test.
+
+```{r}
+split_data <- initial_split(
+                    data   = train,
+                    prop   = 0.8,
+                    strata = Survived
+                 )
+data_train <- training(split_data)
+data_test  <- testing(split_data)
+```
+
+# Preprocesado
+
+Todas las transformaciones sobre los datos con el objetivo de ser útiles, interpretables y valiosos para el estudio pertenecen a esta fase de preprocesamiento. Para ello existen diferentes operaciones que se pueden realizar sobre los datos con este fin, y **Tidymodels** aporta una serie de herramientas mediante al paquete **recipes**.
+
+Las recetas se construyen como una seria de pasos de preprocesamiento como pueden ser:
+
+** Convertir predictores cualitativos en variables _dummy_.
+** Transformar datos para que estén en una escala diferente.
+** Transformar grupos enteros de predictores juntos.
+** Extraer características clave de variables sin procesar.
+
+## Omisión de valores perdidos
+
+Una de las técnicas más comunes, consistente en la eliminación de valores perdidos, básicamente obtiene todos los predictores y elimina aquella información donde existe un valor ausente para no introducir información completa y obtener un modelo más fiable. **recipes** define para ello la función **step_naomit()**, la cual funciona de forma sencilla indicando que predictores evaluar.
+
+## Imputación de valores perdidos
+
+A diferencia de otras técnicas ya conocidas consistentes en la eliminación de valores perdidos o de variables que los contengan, una de las principales ventajas de **Tidymodels** en este ámbito es el de poder imputar valores utilizando el paquete **recipes** mediante diferentes métodos de imputación, que permiten coger los datos ya existentes y predecir el valor de las variables ausentes. Aunque conlleva un riesgo, es un enfoque claramente diferentes a los ya existentes y supone una nueva herramienta a considerar.
+
+Algunos de estos métodos son **step_bagimpute()**, **step_impute_knn()**, **step_meaninpute()**, **step_medianimpute()** y otros más hasta un total de 7 diferentes métodos.
+
+## Exclusión variables con varianza cercana a cero
+
+Como es lógico, los predictores con valor único no se incluyen, pero existen casos donde existen varios valores pero la varianza es prácticamente nula, por lo que no aportan demasiada información, para ello se define en **recipes** la función **step_nzv()**, donde se definen tanto el ratio de frecuencias como el porcentaje de valores únicos.
+
+## Normalización de variables
+
+Como se ha visto en trabajos previos, otra de las técnicas más relevantes es la normalización de datos en diferentes rangos para su procesamiento. Dentro de **recipes** se distinguen principalmente dos estrategias:
+
+** **Centrado**: Restar la media a cada uno de los valores de los predictores. Valores centrados en torno al origen.
+** **Normalización**: Escalar o estandarizar los datos. Como ya conocemos existen dos técnicas principales como son la **Normalización Z-score** y la **Normalización max-min**.
+
+## Binarización de variables
+
+Este procedimiento más conocido como variables **dummy** es muy común y consiste en distinguir todos los casos de una variable en valores binarias de valor 0 o 1 recogiendo de formás más sencilla esta información. **recipes** aporta la función **step_dummy()** la cual binariza las variables y elimina niveles redundantes (novedad frente a otras librerías similares en esta operación).
+
+## Funcionamiento recipes
+
+¿Qué es entonces **recipes**? Una receta no es más que un modelo sobre un conjunto de datos, al cual se le indica la variable objetivo y se le aplican diferentes transformaciones como las indicadas previamente. Por lo tanto a continuación se aplican algunas de dichas transformaciones:
+
+```{r}
+receta <- recipe(
+  formula = Survived ~.,
+  data = data_train
+) %>%
+  # Omisión de valores perdidos
+  step_naomit(all_predictors()) %>%
+  # Exclusión variables varianza cercana a cero
+  step_nzv(all_predictors()) %>%
+  # Normalización max min
+  step_range(all_numeric(), -all_outcomes(), min = 0, max = 1)
+```
+
+A continuación, podemos observar que se ha definido un modelo:
+
+```{r}
+receta
+```
+
+Para poder aplicar dicho modelo, a continuación tenemos que ajsutar dicha receta como _preparada_ con la función **prep()** la cual entrena el modelo, y posteriormente pasaríamos a _cocinarla_ con **juice()** o **bake()** sobre ambos conjuntos. En este caso se utiliza **bake()** ya que con **prep()** se han aprendido las transformaciones.
+
+```{r}
+receta_fit <- prep(receta)
+
+# Aplicar transformaciones
+data_train_prep <- bake(receta_fit, new_data = data_train)
+data_test_prep <- bake(receta_fit, new_data = data_test)
+```
+
+Se puede observar mediante un pequeño análisis que han cambiado las variables:
+
+```{r}
+skim(data_train_prep)
+```
+
+# Modelos de aprendizaje
+
+Como en todo trabajo de Machine Learning, el siguiente paso es el modelado de diferentes herramientas de aprendizaje. La elección de un modelo es una tarea compleja y por eso no se abordará con mayor detenimiento en este trabajo, pero caben destacar una serie de fases a seguir:
+
+1. **Ajuste/Entrenamiento del modelo**: Se aplica un algoritmo de Machine Learning sobre el conjunto de datos de entrenamiento.
+2. **Evaluación/validación del modelo**: Mediante diferentes técnicas se pretende observar como de bueno es el modelo sobre muestras del conjunto inicial de entrenamiento.
+3. **Optimización de hiperparámetros**: Algunos algoritmos poseen diferentes parámetros que se configurar con el objetivo de refinar el modelo a realizar.
+4. **Predicción**: Se utiliza el modelo para predicir datos sobre el conjunto de test.
+
+Aquí es donde se puede percibir la potencia de **Tidymodels** ya que facilita toda esta labor en unas simples operaciones que llevan todo el trabajo por debajo, pero que a su vez permiten ajustar los diferentes modelos con gran detalle si se desea de una forma muy intuitiva. Para ello posee diferentes paquetes que veremos a continuación.
+
+## Entrenamiento
+
+Para los diferentes modelos dentro de **Tidymodels** existe un paquete único denominado **parsnip**, el cual se abstrae al igual que librerías como **caret** de la customización de cada una de las librerías existentes y facilita una interfaz única de entrenamiento del modelo de forma que se definen tres componentes principales: **modelo**, **engine** (implementación) y **ajuste**.
+
+### Modelo
+
+A continuación, con el objetivo de observar un modelo sencillo, se va a utilizar un **árbol de regresión**, el cual permitirá predecir en base a los predictores si un pasajero ha sobrevivido o no al hundimiento del Titanic. Realmente es sencillo y solo cabe señalar que se indica el algoritmo **rpart**:
+
+```{r}
+modelo_rpart <- decision_tree(mode = "classification") %>%
+                set_engine(engine = "rpart")
+```
+
+A continuación se procedería a realizar el ajuste del modelo, para ello **parnsip** ofrece dos funciones de ajuste siendo **fit()** y **fit_xy()** (esta última en lugar de la clásica fórmula define matrices de predictores y vector de variable respuesta). Utilizaremos por simpleza **fit()**.
+
+```{r}
+modelo_rpart_fit <- modelo_rpart %>% fit(formula = Survived ~., 
+                                         data = data_train_prep)
+```
+
+## Validación
+
+**Tidymodels** ofrece nuevamente un paquete con la finalidad de simplificar el procedimiento de validación de un modelo de forma que recoja diferentes métodos como _Bootsrap_, _validación cruzada_ u otros en un mismo paquete denominado **rsampler** (mencionado previamente). Para ello es necesario definir un objeto **resampler** el cual contiene la información asociada los repartos de los conjuntos de datos.
+
+A continuación se muestra con una validación cruzada sencilla mediante la función **vfold_cv()**:
+
+```{r}
+fold <- vfold_cv(data = data_train_prep, v = 5, repeats = 10, strata = Survived)
+```
+
+Una vez definidas las particiones, se emplea la función **fit_resamples()** para ajustar el modelo:
+
+```{r, include=FALSE}
+modelo_rpart <- decision_tree(mode = "classification") %>%
+                set_engine(engine = "rpart")
+```
+
+```{r}
+modelo_rpart_val_fit <- fit_resamples(object = modelo_rpart,
+                                      preprocessor = receta,
+                                      resamples = fold,
+                                      metrics = metric_set(roc_auc),
+                                      control = control_resamples(
+                                        save_pred = TRUE))
+```
+
+Los resultados se almacenan en forma de **tibble**, donde las columnas contienen la información sobre cada partición: su id, las observaciones que forman parte, las métricas calculadas, si ha habido algún error o warning durante el ajuste, y las predicciones de validación si se ha indicado y se obtiene la información **collect_predictions()** y **collect_metrics()**. Además también es posible indicarle el preprocesamiento en el mismo ajuste, lo cual resulta finalmente bastante cómodo.
+
+```{r}
+modelo_rpart_val_fit %>% collect_metrics(summarize = TRUE)
+```
+
+Por último cabría destacar que para todos los métodos de **resampling** es posible una paralelización de los mismos ya que **Tidymodels** a traves de sus paquetes soporta dicha funcionalidad, la cual es una gran ventaja frente a otras librerías parecidas.
+
+## Ajuste de hiperparámetros o Tuning
+
+Muchos de los modelos contienen lo que se denominan **hiperparámetros**, los cuales son parámetros que no puden ser aprendidos sino que deben ser establecidos por un profesional, además es posible definir de forma sencilla estos parámetros gracias a la función **tune()** que ofrece el paquete **tune**, y que permite sin gran esfuerzo explorar una gran cantidad de valores para poder encontrar los mejores parámetros posibles para el modelo.
+
+Una vez definido el modelo y ajustados los parámetros a explorar con la función **tune()** (también es posible detallarla en mayor medida), quedaría definir el modelo con la función **tune_grid()** que permite establecer el número de combinaciones generadas automáticamente (por supuesto también paralelizable).
+
+```{r, echo=FALSE, warning=FALSE}
+modelo_rpart <- decision_tree(
+                 mode       = "classification",
+                 tree_depth = tune(),
+                 min_n      = tune()
+               ) %>%
+               set_engine(engine = "rpart")
+
+fold <- vfold_cv(data = data_train_prep, v = 5, repeats = 10, strata = Survived)
+
+# Ejecución tuning y ajuste modelo
+modelo_rpart_tune_fit <- tune_grid(object = modelo_rpart,
+                                        preprocessor = receta,
+                                        resamples = fold,
+                                        metrics = metric_set(roc_auc),
+                                        control = control_resamples(
+                                          save_pred = TRUE),
+                                       grid = 10)
+```
+
+Los resultados de la búsqueda de hiperparámetros pueden verse con las funciones auxiliares **collect_metrics()**, **collect_predictions()**, **show_best()** y **select_best()**.
+
+```{r}
+modelo_rpart_tune_fit %>% show_best(metric = "roc_auc", n = 5)
+```
+
+Una vez realizado todo este procedimiento, es tan simple como obtener los mejores hiperparámetros con la función **select_best()** y aplicarlos al modelo con la función **finalize_model()**:
+
+```{r}
+hiperpara_finales <- select_best(modelo_rpart_tune_fit, metric = "roc_auc")
+
+modelo_final <- finalize_model(x = modelo_rpart, parameters = hiperpara_finales)
+
+modelo_final_fit <- modelo_final %>% fit(formula = Survived~., data_train_prep)
+```
+
+## Predicción
+
+Para realizar las predicciones sobre el conjunto de test es tan simple como emplear la función **predict** que ya conocemos de prácticas previas, por lo que sería de la siguiente forma:
+
+```{r}
+predicciones <- modelo_final_fit %>%
+                predict(
+                  new_data = data_test_prep
+                )
+```
+
+# Validación de resultados
+
+Como cabría esperar **Tidymodels** ofrece nuevamente una serie de funciones que permiten mediante el paquete **yardstick** ofrecer una serie de métricas que permitan comprobar el desempeño del modelo en base al conjunto de test que se ha predicho. Para ello utiliza la función **metrics()**, la cual es personalizable y permite definir una serie de medidas que se ajustan dado el tipo de modelo.
+
+Otra de las cosas más interesante de **metrics()** es que permite configurar directamente la fuente de verdad de las clases que se pretenden obtener frente a la clases estimada por lo que resulta realmente cómodo utilizar dicha función para validar.
+
+```{r}
+modelo_final_fit %>%
+  predict(data_test_prep) %>%
+  bind_cols(data_test_prep) %>%
+  metrics(truth = Survived, estimate = .pred_class)
+```
+
+Como es lógico también podemos obtener las probabilidades de las predicciones en lugar de simplemente una asignación de clase:
+
+```{r}
+pred_prob <- modelo_final_fit %>%
+  predict(data_test_prep, type = "prob") %>%
+  bind_cols(data_test_prep)
+```
+
+Y si queremos podemos mostrar la curva **ROC** directamente con la función **roc_curve()** usando **autoplot()**:
+
+```{r}
+pred_prob %>%
+  roc_curve(Survived, .pred_0) %>%
+  autoplot()+
+  labs(title = 'Curva ROC')
+```
+
+# Workflows
+
+Los **workflows** permiten combinar en un solo objeto todos los elementos que se encargan del preprocesamiento (**recipes**) y modelado (**parsnip** y **tune**). Para crear el **workflow** se van encadenando los elementos con las funciones **add_*** o bien modificando los elementos ya existentes con las funciones **update_***.
+
+```{r}
+modelo_rpart <- decision_tree(
+                 mode       = "classification",
+                 tree_depth = tune(),
+                 min_n      = tune()
+               ) %>%
+               set_engine(engine = "rpart")
+
+receta <- recipe(
+  formula = Survived ~.,
+  data = data_train
+) %>%
+  # Omisión de valores perdidos
+  step_naomit(all_predictors()) %>%
+  # Exclusión variables varianza cercana a cero
+  step_nzv(all_predictors()) %>%
+  # Normalización max min
+  step_range(all_numeric(), -all_outcomes(), min = 0, max = 1)
+
+fold <- vfold_cv(data = data_train_prep, v = 5, repeats = 10, strata = Survived)
+
+workflow_modelo <- workflow() %>%
+                     add_recipe(receta) %>%
+                     add_model(modelo_rpart)
+
+workflow_modelo
+```
+
+Cabe destacar que se podrían aplicar técnicas de **tuning** con la función **tune_grid()** sobre el modelo del workflow tal y como si de un modelo normal se tratase, por lo que resulta claramente cómodo agrupar funcionalidades en flujos de trabajo. Por otro lado, para seleccionar el mejor modelo funcionará exactamente igual que como si de un modelo normal se tratase, pero en lugar de finalizar el modelo, se finaliza el workflow con **finalize_workflow()** y se obtiene el modelo con **pull_workflow_fit()**.
+
+```{r}
+modelo_final_fit <- finalize_workflow(
+                        x = workflow_modelo,
+                        parameters = hiperpara_finales
+                    ) %>%
+                    fit(
+                      data = data_train_prep
+                    ) %>%
+                    pull_workflow_fit()
+
+modelo_final_fit
+```
